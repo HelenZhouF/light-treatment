@@ -1,11 +1,12 @@
 from fastapi import FastAPI, Response, Request, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func, delete, and_, or_
 from sqlalchemy.orm import selectinload
 from typing import Optional
 import json
 import traceback
+import re
 
 from app.database import init_db, async_session
 from app.models import TreatmentDefinition, Attribute, ValueConstraint
@@ -37,6 +38,130 @@ MEDIA_TYPE_ROOT = "application/vnd.sas.api"
 BASE_URI = "/treatmentDefinition/definitions"
 
 
+class FilterParseError(Exception):
+    """Exception raised for invalid filter syntax"""
+    pass
+
+
+def parse_filter(filter_str: str):
+    """Parse filter expression like eq(name,'Test') or gt(id,5) or in(name,'val1','val2')"""
+    
+    valid_operators = ['eq', 'gt', 'lt', 'ge', 'le', 'ne', 'contains', 'startsWith', 'in']
+    
+    value_pattern = r"(?:'([^']*)'|(\d+(?:\.\d+)?))"
+    
+    patterns = {
+        'eq': rf"eq\((\w+),\s*{value_pattern}\)",
+        'gt': rf"gt\((\w+),\s*{value_pattern}\)",
+        'lt': rf"lt\((\w+),\s*{value_pattern}\)",
+        'ge': rf"ge\((\w+),\s*{value_pattern}\)",
+        'le': rf"le\((\w+),\s*{value_pattern}\)",
+        'ne': rf"ne\((\w+),\s*{value_pattern}\)",
+        'contains': rf"contains\((\w+),\s*{value_pattern}\)",
+        'startsWith': rf"startsWith\((\w+),\s*{value_pattern}\)",
+        'in': r"in\((\w+),\s*((?:'[^']*')(?:\s*,\s*'[^']*')*)\)",
+    }
+    
+    filters = []
+    
+    found_any = False
+    for op, pattern in patterns.items():
+        matches = re.findall(pattern, filter_str)
+        for match in matches:
+            found_any = True
+            field_name = match[0]
+            
+            if op == 'in':
+                values_str = match[1]
+                values = re.findall(r"'([^']*)'", values_str)
+                filters.append({
+                    'operator': op,
+                    'field': field_name,
+                    'values': values
+                })
+            else:
+                str_value = match[1]
+                num_value = match[2]
+                
+                if num_value and num_value != '':
+                    value = float(num_value) if '.' in num_value else int(num_value)
+                else:
+                    value = str_value
+                
+                filters.append({
+                    'operator': op,
+                    'field': field_name,
+                    'value': value
+                })
+    
+    if not found_any and filter_str:
+        valid_ops_pattern = '|'.join(valid_operators)
+        if not re.match(rf"^\s*({valid_ops_pattern})\s*\(", filter_str):
+            raise FilterParseError(f"Invalid filter syntax: '{filter_str}'. Valid operators are: {', '.join(valid_operators)}")
+        
+        if not re.match(rf"^\s*({valid_ops_pattern})\s*\(\s*\w+\s*,", filter_str):
+            raise FilterParseError(f"Invalid filter syntax: '{filter_str}'. Expected field name after operator")
+    
+    return filters
+
+
+def apply_filters(query, filters, model):
+    """Apply parsed filters to SQLAlchemy query"""
+    conditions = []
+    for f in filters:
+        field_name = f['field']
+        operator = f['operator']
+        
+        if not hasattr(model, field_name):
+            continue
+        
+        column = getattr(model, field_name)
+        
+        if operator == 'in':
+            values = f.get('values', [])
+            if values:
+                conditions.append(column.in_(values))
+        else:
+            value = f['value']
+            
+            if operator == 'eq':
+                conditions.append(column == value)
+            elif operator == 'gt':
+                conditions.append(column > value)
+            elif operator == 'lt':
+                conditions.append(column < value)
+            elif operator == 'ge':
+                conditions.append(column >= value)
+            elif operator == 'le':
+                conditions.append(column <= value)
+            elif operator == 'ne':
+                conditions.append(column != value)
+            elif operator == 'contains':
+                conditions.append(column.contains(str(value)))
+            elif operator == 'startsWith':
+                conditions.append(column.startswith(str(value)))
+    
+    if conditions:
+        query = query.where(and_(*conditions))
+    
+    return query
+
+
+def parse_sort_by(sort_by_str: str):
+    """Parse sortBy parameter like 'name:ascending' or 'modifiedTimeStamp:descending'"""
+    parts = sort_by_str.split(':')
+    if len(parts) != 2:
+        return None, None
+    
+    field_name, direction = parts
+    direction = direction.lower()
+    
+    if direction not in ('ascending', 'descending'):
+        return None, None
+    
+    return field_name, direction
+
+
 def link_to_dict(link: Link) -> dict:
     return link.model_dump()
 
@@ -45,10 +170,10 @@ def generate_definition_links(definition_id: int) -> list[dict]:
     return [
         link_to_dict(Link(rel="self", href=f"{BASE_URI}/{definition_id}", method="GET", type=MEDIA_TYPE_DEFINITION)),
         link_to_dict(Link(rel="up", href=f"{BASE_URI}", method="GET", type=MEDIA_TYPE_COLLECTION)),
-        link_to_dict(Link(rel="alternate", href=f"{BASE_URI}/{definition_id}#summary", method="GET", type=MEDIA_TYPE_SUMMARY)),
+        link_to_dict(Link(rel="alternate", href=f"{BASE_URI}/{definition_id}?view=summary", method="GET", type=MEDIA_TYPE_SUMMARY)),
         link_to_dict(Link(rel="update", href=f"{BASE_URI}/{definition_id}", method="PUT", type=MEDIA_TYPE_DEFINITION)),
         link_to_dict(Link(rel="delete", href=f"{BASE_URI}/{definition_id}", method="DELETE")),
-        link_to_dict(Link(rel="revisions", href=f"{BASE_URI}/{definition_id}#revisionSummary", method="GET", type=MEDIA_TYPE_SUMMARY)),
+        link_to_dict(Link(rel="revisions", href=f"{BASE_URI}/{definition_id}?view=revisionSummary", method="GET", type=MEDIA_TYPE_SUMMARY)),
         link_to_dict(Link(rel="dependencies", href=f"{BASE_URI}/{definition_id}/dependencies", method="GET")),
     ]
 
@@ -226,32 +351,39 @@ async def get_definitions(
     request: Request,
     start: int = Query(0, ge=0, description="Start index for pagination"),
     limit: int = Query(10, ge=1, le=100, description="Maximum items to return"),
-    filter: Optional[str] = Query(None, description="Filter criteria"),
-    sortBy: Optional[str] = Query(None, description="Sort by field"),
+    filter: Optional[str] = Query(None, description="Filter criteria (e.g., eq(name,'Test'))"),
+    sortBy: Optional[str] = Query(None, description="Sort by field (e.g., name:ascending)"),
     accept_item: Optional[str] = Header(None, alias="Accept-Item"),
 ):
+    try:
+        parsed_filters = parse_filter(filter) if filter else []
+    except FilterParseError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
     async with async_session() as db:
         query = select(TreatmentDefinition).options(
             selectinload(TreatmentDefinition.attributes).selectinload(Attribute.valueConstraints)
         )
 
         if filter:
-            query = query.where(TreatmentDefinition.name.contains(filter))
+            query = apply_filters(query, parsed_filters, TreatmentDefinition)
 
         if sortBy:
-            sort_field = sortBy.lstrip("-")
-            if hasattr(TreatmentDefinition, sort_field):
+            sort_field, direction = parse_sort_by(sortBy)
+            if sort_field and hasattr(TreatmentDefinition, sort_field):
                 column = getattr(TreatmentDefinition, sort_field)
-                if sortBy.startswith("-"):
+                if direction == 'descending':
                     query = query.order_by(column.desc())
                 else:
                     query = query.order_by(column)
+            else:
+                query = query.order_by(TreatmentDefinition.id)
         else:
             query = query.order_by(TreatmentDefinition.id)
 
         count_query = select(func.count()).select_from(TreatmentDefinition)
         if filter:
-            count_query = count_query.where(TreatmentDefinition.name.contains(filter))
+            count_query = apply_filters(count_query, parsed_filters, TreatmentDefinition)
         result = await db.execute(count_query)
         count = result.scalar()
 
@@ -295,6 +427,7 @@ async def get_definitions(
 async def get_definition(
     definition_id: int,
     request: Request,
+    view: Optional[str] = Query(None, description="View type: summary or revisionSummary"),
     accept_item: Optional[str] = Header(None, alias="Accept-Item"),
 ):
     async with async_session() as db:
@@ -307,9 +440,10 @@ async def get_definition(
         if not definition:
             raise HTTPException(status_code=404, detail="Definition not found")
 
-        url = str(request.url)
-        is_summary = "#summary" in url
-        is_revision = "#revisionSummary" in url
+        url_fragment = request.url.fragment if request.url.fragment else None
+        
+        is_summary = (view == "summary") or (url_fragment == "summary")
+        is_revision = (view == "revisionSummary") or (url_fragment == "revisionSummary")
 
         if is_revision or accept_item == "application/vnd.sas.revision.summary+json":
             data = model_to_revision_summary(definition)
