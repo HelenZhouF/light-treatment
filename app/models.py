@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Float
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
@@ -135,3 +135,79 @@ class ValueConstraint(Base):
     enumValues = Column(Text, nullable=True)
 
     attribute = relationship("Attribute", back_populates="valueConstraints")
+
+
+class TreatmentDefinitionGroup(Base):
+    __tablename__ = "treatment_definition_groups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False, index=True)
+    description = Column(Text, nullable=True)
+
+    createdBy = Column(String(255), nullable=True)
+    creationTimeStamp = Column(DateTime, default=datetime.utcnow)
+    modifiedBy = Column(String(255), nullable=True)
+    modifiedTimeStamp = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    majorRevision = Column(Integer, default=1)
+    minorRevision = Column(Integer, default=0)
+    checkout = Column(Boolean, default=False)
+    locked = Column(Boolean, default=False)
+    status = Column(String(50), default="valid")
+
+    activationStatus = Column(String(50), default="inactive")
+    activationError = Column(Text, nullable=True)
+    activatedTimeStamp = Column(DateTime, nullable=True)
+
+    parentFolderUri = Column(Text, nullable=True)
+    fromRevisionUri = Column(Text, nullable=True)
+
+    version = Column(Integer, default=1)
+
+    members = relationship("GroupMember", back_populates="group", cascade="all, delete-orphan")
+
+
+class GroupMember(Base):
+    __tablename__ = "treatment_definition_group_members"
+
+    id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(Integer, ForeignKey("treatment_definition_groups.id"), nullable=False, index=True)
+    definitionId = Column(Integer, ForeignKey("treatment_definitions.id"), nullable=False, index=True)
+    definitionRevisionId = Column(Integer, ForeignKey("treatment_definition_revisions.id"), nullable=True)
+    definitionRevisionName = Column(String(255), nullable=True)
+
+    group = relationship("TreatmentDefinitionGroup", back_populates="members")
+    definition = relationship("TreatmentDefinition", foreign_keys=[definitionId])
+    revision = relationship("TreatmentDefinitionRevision", foreign_keys=[definitionRevisionId])
+
+    attributeValueMappings = relationship(
+        "AttributeValueMapping", back_populates="member", cascade="all, delete-orphan"
+    )
+    attributeNameAliases = relationship(
+        "AttributeNameAlias", back_populates="member", cascade="all, delete-orphan"
+    )
+
+
+class AttributeValueMapping(Base):
+    __tablename__ = "attribute_value_mappings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    member_id = Column(Integer, ForeignKey("treatment_definition_group_members.id"), nullable=False, index=True)
+    attributeId = Column(Integer, ForeignKey("attributes.id"), nullable=True)
+    attributeName = Column(String(255), nullable=False)
+    mappingType = Column(String(20), nullable=False)
+    value = Column(Text, nullable=True)
+
+    member = relationship("GroupMember", back_populates="attributeValueMappings")
+
+
+class AttributeNameAlias(Base):
+    __tablename__ = "attribute_name_aliases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    member_id = Column(Integer, ForeignKey("treatment_definition_group_members.id"), nullable=False, index=True)
+    attributeId = Column(Integer, ForeignKey("attributes.id"), nullable=True)
+    attributeName = Column(String(255), nullable=False)
+    aliasName = Column(String(255), nullable=False)
+
+    member = relationship("GroupMember", back_populates="attributeNameAliases")

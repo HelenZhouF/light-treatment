@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Any
 from datetime import datetime
 
@@ -154,3 +154,151 @@ class RevisionSelection(BaseModel):
 
 class RevisionBatchQuery(BaseModel):
     selection: RevisionSelection
+
+
+# ------------------------- Treatment Definition Group schemas -------------------------
+
+
+class AttributeValueMappingCreate(BaseModel):
+    attributeId: Optional[int] = None
+    attributeName: str
+    mappingType: str = Field(..., pattern="^(variable|constant)$")
+    value: Optional[str] = None
+
+
+class AttributeValueMappingUpdate(BaseModel):
+    attributeId: Optional[int] = None
+    attributeName: Optional[str] = None
+    mappingType: Optional[str] = Field(None, pattern="^(variable|constant)$")
+    value: Optional[str] = None
+
+
+class AttributeValueMappingResponse(BaseModel):
+    id: int
+    attributeId: Optional[int] = None
+    attributeName: str
+    mappingType: str
+    value: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class AttributeNameAliasCreate(BaseModel):
+    attributeId: Optional[int] = None
+    attributeName: str
+    aliasName: str
+
+
+class AttributeNameAliasUpdate(BaseModel):
+    attributeId: Optional[int] = None
+    attributeName: Optional[str] = None
+    aliasName: Optional[str] = None
+
+
+class AttributeNameAliasResponse(BaseModel):
+    id: int
+    attributeId: Optional[int] = None
+    attributeName: str
+    aliasName: str
+
+    class Config:
+        from_attributes = True
+
+
+class GroupMemberCreate(BaseModel):
+    definitionId: int
+    definitionRevisionId: Optional[int] = None
+    definitionRevisionName: Optional[str] = None
+    attributeValueMappings: Optional[List[AttributeValueMappingCreate]] = None
+    attributeNameAliases: Optional[List[AttributeNameAliasCreate]] = None
+
+
+class GroupMemberUpdate(BaseModel):
+    definitionId: Optional[int] = None
+    definitionRevisionId: Optional[int] = None
+    definitionRevisionName: Optional[str] = None
+    attributeValueMappings: Optional[List[AttributeValueMappingCreate]] = None
+    attributeNameAliases: Optional[List[AttributeNameAliasCreate]] = None
+
+
+class GroupMemberResponse(BaseModel):
+    id: int
+    definitionId: int
+    definitionRevisionId: Optional[int] = None
+    definitionRevisionName: Optional[str] = None
+    attributeValueMappings: List[AttributeValueMappingResponse] = []
+    attributeNameAliases: List[AttributeNameAliasResponse] = []
+
+    class Config:
+        from_attributes = True
+
+
+class TreatmentDefinitionGroupBase(BaseModel):
+    name: str = Field(..., min_length=1)
+    description: Optional[str] = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name_not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("name must not be empty or blank")
+        return v.strip()
+
+
+class TreatmentDefinitionGroupCreate(TreatmentDefinitionGroupBase):
+    parentFolderUri: Optional[str] = None
+    fromRevisionUri: Optional[str] = None
+    members: Optional[List[GroupMemberCreate]] = None
+
+
+class TreatmentDefinitionGroupUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1)
+    description: Optional[str] = None
+    members: Optional[List[GroupMemberCreate]] = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name_not_blank(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and (not v or not v.strip()):
+            raise ValueError("name must not be empty or blank")
+        return v.strip() if v is not None else None
+
+
+class TreatmentDefinitionGroupSummary(BaseModel):
+    id: int
+    name: str
+    description: Optional[str] = None
+    createdBy: Optional[str] = None
+    creationTimeStamp: Optional[datetime] = None
+    modifiedBy: Optional[str] = None
+    modifiedTimeStamp: Optional[datetime] = None
+    majorRevision: int = 1
+    minorRevision: int = 0
+    checkout: bool = False
+    locked: bool = False
+    status: str = "valid"
+    activationStatus: Optional[str] = None
+    activationError: Optional[str] = None
+    activatedTimeStamp: Optional[datetime] = None
+    parentFolderUri: Optional[str] = None
+    fromRevisionUri: Optional[str] = None
+    links: List[Link] = []
+
+    class Config:
+        from_attributes = True
+
+
+class TreatmentDefinitionGroupRevisionSummary(BaseModel):
+    id: int
+    name: str
+    majorRevision: int
+    minorRevision: int
+    status: str
+    activationStatus: Optional[str] = None
+    links: List[Link] = []
+
+
+class TreatmentDefinitionGroupResponse(TreatmentDefinitionGroupSummary):
+    members: List[GroupMemberResponse] = []
+    version: int = 1
