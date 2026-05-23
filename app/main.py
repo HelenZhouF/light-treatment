@@ -10,11 +10,14 @@ import re
 
 from app.database import init_db, async_session
 from app.models import TreatmentDefinition, Attribute, ValueConstraint
+from app.models import TreatmentDefinitionRevision, RevisionAttribute, RevisionValueConstraint, CheckOut
 from app.schemas import (
     TreatmentDefinitionRoot,
     TreatmentDefinitionCreate,
     TreatmentDefinitionUpdate,
     Link,
+    RevisionCreate,
+    RevisionBatchQuery,
 )
 
 app = FastAPI(
@@ -32,7 +35,9 @@ async def startup_event():
 MEDIA_TYPE_DEFINITION = "application/vnd.sas.treatment.definition+json"
 MEDIA_TYPE_COLLECTION = "application/vnd.sas.collection+json"
 MEDIA_TYPE_SUMMARY = "application/vnd.sas.summary+json"
+MEDIA_TYPE_DCM_SUMMARY = "application/vnd.sas.dcm.summary+json"
 MEDIA_TYPE_ROOT = "application/vnd.sas.api"
+MEDIA_TYPE_REVISION = "application/vnd.sas.treatment.definition+json"
 
 
 BASE_URI = "/treatmentDefinition/definitions"
@@ -148,18 +153,20 @@ def apply_filters(query, filters, model):
 
 
 def parse_sort_by(sort_by_str: str):
-    """Parse sortBy parameter like 'name:ascending' or 'modifiedTimeStamp:descending'"""
+    """Parse sort parameter like 'name:ascending', '-majorRevision', or 'id'"""
+    if sort_by_str.startswith('-'):
+        field_name = sort_by_str[1:]
+        return field_name, 'descending'
+    
     parts = sort_by_str.split(':')
-    if len(parts) != 2:
-        return None, None
+    if len(parts) == 2:
+        field_name, direction = parts
+        direction = direction.lower()
+        if direction not in ('ascending', 'descending'):
+            return None, None
+        return field_name, direction
     
-    field_name, direction = parts
-    direction = direction.lower()
-    
-    if direction not in ('ascending', 'descending'):
-        return None, None
-    
-    return field_name, direction
+    return sort_by_str, 'ascending'
 
 
 def link_to_dict(link: Link) -> dict:
@@ -352,7 +359,7 @@ async def get_definitions(
     start: int = Query(0, ge=0, description="Start index for pagination"),
     limit: int = Query(10, ge=1, le=100, description="Maximum items to return"),
     filter: Optional[str] = Query(None, description="Filter criteria (e.g., eq(name,'Test'))"),
-    sortBy: Optional[str] = Query(None, description="Sort by field (e.g., name:ascending)"),
+    sortedBy: Optional[str] = Query(None, description="Sort by field (e.g., -majorRevision, name:ascending)"),
     accept_item: Optional[str] = Header(None, alias="Accept-Item"),
 ):
     try:
@@ -368,8 +375,8 @@ async def get_definitions(
         if filter:
             query = apply_filters(query, parsed_filters, TreatmentDefinition)
 
-        if sortBy:
-            sort_field, direction = parse_sort_by(sortBy)
+        if sortedBy:
+            sort_field, direction = parse_sort_by(sortedBy)
             if sort_field and hasattr(TreatmentDefinition, sort_field):
                 column = getattr(TreatmentDefinition, sort_field)
                 if direction == 'descending':
@@ -660,3 +667,623 @@ async def get_definition_dependencies(
         }
 
         return JSONResponse(content=collection, media_type=MEDIA_TYPE_COLLECTION)
+
+
+# ------------------------- Revision helpers -------------------------
+
+REVISION_BASE_URI = BASE_URI
+
+
+def revision_uri(definition_id: int, revision_id=None) -> str:
+    if revision_id is None:
+        return f"{BASE_URI}/{definition_id}/revisions"
+    return f"{BASE_URI}/{definition_id}/revisions/{revision_id}"
+
+
+def generate_revision_links(definition_id: int, revision_id: int) -> list[dict]:
+    uri = revision_uri(definition_id, revision_id)
+    return [
+        link_to_dict(Link(rel="self", href=uri, method="GET", type=MEDIA_TYPE_REVISION)),
+        link_to_dict(Link(rel="up", href=revision_uri(definition_id), method="GET", type=MEDIA_TYPE_COLLECTION)),
+        link_to_dict(Link(rel="alternate", href=f"{uri}#summary", method="GET", type=MEDIA_TYPE_SUMMARY)),
+        link_to_dict(Link(rel="alternate", href=f"{uri}#revisionSummary", method="GET", type=MEDIA_TYPE_DCM_SUMMARY)),
+        link_to_dict(Link(rel="delete", href=uri, method="DELETE")),
+        link_to_dict(Link(rel="checkOuts", href=f"{uri}/checkOuts", method="GET", type=MEDIA_TYPE_COLLECTION)),
+    ]
+
+
+def generate_revision_collection_links(definition_id: int, start: int, limit: int, count: int) -> list[dict]:
+    uri = revision_uri(definition_id)
+    links = [
+        link_to_dict(Link(rel="self", href=f"{uri}?start={start}&limit={limit}", method="GET", type=MEDIA_TYPE_COLLECTION)),
+        link_to_dict(Link(rel="up", href=f"{BASE_URI}/{definition_id}", method="GET", type=MEDIA_TYPE_DEFINITION)),
+        link_to_dict(Link(rel="create", href=uri, method="POST", type=MEDIA_TYPE_REVISION)),
+    ]
+    if start + limit < count:
+        links.append(
+            link_to_dict(Link(
+                rel="next",
+                href=f"{uri}?start={start + limit}&limit={limit}",
+                method="GET",
+                type=MEDIA_TYPE_COLLECTION,
+            ))
+        )
+    if start > 0:
+        prev_start = max(0, start - limit)
+        links.append(
+            link_to_dict(Link(
+                rel="prev",
+                href=f"{uri}?start={prev_start}&limit={limit}",
+                method="GET",
+                type=MEDIA_TYPE_COLLECTION,
+            ))
+        )
+    return links
+
+
+def revision_model_to_response(rev: TreatmentDefinitionRevision) -> dict:
+    data = {
+        "id": rev.id,
+        "name": rev.name,
+        "description": rev.description,
+        "createdBy": rev.createdBy,
+        "creationTimeStamp": rev.creationTimeStamp.isoformat() if rev.creationTimeStamp else None,
+        "modifiedBy": rev.modifiedBy,
+        "modifiedTimeStamp": rev.modifiedTimeStamp.isoformat() if rev.modifiedTimeStamp else None,
+        "majorRevision": rev.majorRevision,
+        "minorRevision": rev.minorRevision,
+        "checkout": rev.checkout,
+        "locked": rev.locked,
+        "status": rev.status,
+        "folderType": rev.folderType,
+        "sourceRevisionUri": rev.sourceRevisionUri,
+        "copyTimeStamp": rev.copyTimeStamp.isoformat() if rev.copyTimeStamp else None,
+        "fromRevisionUri": rev.fromRevisionUri,
+        "isActive": rev.isActive,
+        "attributes": [],
+        "links": generate_revision_links(rev.treatment_definition_id, rev.id),
+    }
+    for attr in rev.attributes:
+        attr_data = {
+            "id": attr.id,
+            "name": attr.name,
+            "defaultValue": attr.defaultValue,
+        }
+        if attr.valueConstraints:
+            vc = attr.valueConstraints
+            attr_data["valueConstraints"] = {
+                "id": vc.id,
+                "dataType": vc.dataType,
+                "format": vc.format,
+                "required": vc.required,
+                "readOnly": vc.readOnly,
+                "multiple": vc.multiple,
+                "range": vc.range,
+                "enum": json.loads(vc.enumValues) if vc.enumValues else None,
+            }
+        data["attributes"].append(attr_data)
+    return data
+
+
+def revision_model_to_summary(rev: TreatmentDefinitionRevision) -> dict:
+    return {
+        "id": rev.id,
+        "name": rev.name,
+        "description": rev.description,
+        "createdBy": rev.createdBy,
+        "creationTimeStamp": rev.creationTimeStamp.isoformat() if rev.creationTimeStamp else None,
+        "modifiedBy": rev.modifiedBy,
+        "modifiedTimeStamp": rev.modifiedTimeStamp.isoformat() if rev.modifiedTimeStamp else None,
+        "majorRevision": rev.majorRevision,
+        "minorRevision": rev.minorRevision,
+        "checkout": rev.checkout,
+        "locked": rev.locked,
+        "status": rev.status,
+        "isActive": rev.isActive,
+        "links": generate_revision_links(rev.treatment_definition_id, rev.id),
+    }
+
+
+def revision_model_to_revision_summary(rev: TreatmentDefinitionRevision) -> dict:
+    return {
+        "id": rev.id,
+        "name": rev.name,
+        "majorRevision": rev.majorRevision,
+        "minorRevision": rev.minorRevision,
+        "status": rev.status,
+        "isActive": rev.isActive,
+        "links": generate_revision_links(rev.treatment_definition_id, rev.id),
+    }
+
+
+async def create_revision_attributes_from_source(db: AsyncSession, revision_id: int, source_attributes: list):
+    for src_attr in source_attributes:
+        attr = RevisionAttribute(
+            revision_id=revision_id,
+            name=src_attr.name,
+            defaultValue=src_attr.defaultValue,
+        )
+        db.add(attr)
+        await db.flush()
+
+        if src_attr.valueConstraints:
+            src_vc = src_attr.valueConstraints
+            vc = RevisionValueConstraint(
+                attribute_id=attr.id,
+                dataType=src_vc.dataType,
+                format=src_vc.format,
+                required=src_vc.required or False,
+                readOnly=src_vc.readOnly or False,
+                multiple=src_vc.multiple or False,
+                range=src_vc.range or False,
+                enumValues=src_vc.enumValues,
+            )
+            db.add(vc)
+
+
+# ------------------------- Revision API -------------------------
+
+
+@app.get(
+    f"{BASE_URI}/{{definition_id}}/revisions",
+    responses={
+        200: {
+            "content": {
+                MEDIA_TYPE_COLLECTION: {},
+                MEDIA_TYPE_SUMMARY: {},
+                MEDIA_TYPE_DCM_SUMMARY: {},
+            },
+            "description": "Collection of treatment definition revisions",
+        },
+        404: {"description": "Definition not found"},
+    },
+)
+async def get_revisions(
+    definition_id: int,
+    request: Request,
+    start: int = Query(0, ge=0, description="Start index for pagination"),
+    limit: int = Query(10, ge=1, le=100, description="Maximum items to return"),
+    filter: Optional[str] = Query(None, description="Filter criteria (e.g., eq(status,'valid'))"),
+    sortedBy: Optional[str] = Query(None, description="Sort by field (e.g., -majorRevision, creationTimeStamp:descending)"),
+    accept_item: Optional[str] = Header(None, alias="Accept-Item"),
+):
+    async with async_session() as db:
+        def_query = select(TreatmentDefinition.id).where(TreatmentDefinition.id == definition_id)
+        def_result = await db.execute(def_query)
+        if not def_result.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="Definition not found")
+
+    try:
+        parsed_filters = parse_filter(filter) if filter else []
+    except FilterParseError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    async with async_session() as db:
+        query = select(TreatmentDefinitionRevision).options(
+            selectinload(TreatmentDefinitionRevision.attributes).selectinload(RevisionAttribute.valueConstraints)
+        ).where(TreatmentDefinitionRevision.treatment_definition_id == definition_id)
+
+        if filter:
+            query = apply_filters(query, parsed_filters, TreatmentDefinitionRevision)
+
+        if sortedBy:
+            sort_field, direction = parse_sort_by(sortedBy)
+            if sort_field and hasattr(TreatmentDefinitionRevision, sort_field):
+                column = getattr(TreatmentDefinitionRevision, sort_field)
+                if direction == 'descending':
+                    query = query.order_by(column.desc())
+                else:
+                    query = query.order_by(column)
+            else:
+                query = query.order_by(TreatmentDefinitionRevision.id)
+        else:
+            query = query.order_by(TreatmentDefinitionRevision.id)
+
+        count_query = select(func.count()).select_from(TreatmentDefinitionRevision).where(
+            TreatmentDefinitionRevision.treatment_definition_id == definition_id
+        )
+        if filter:
+            count_query = apply_filters(count_query, parsed_filters, TreatmentDefinitionRevision)
+        count_result = await db.execute(count_query)
+        count = count_result.scalar()
+
+        query = query.offset(start).limit(limit)
+        result = await db.execute(query)
+        revisions = result.scalars().all()
+
+        if accept_item == MEDIA_TYPE_DCM_SUMMARY:
+            items = [revision_model_to_revision_summary(r) for r in revisions]
+            media_type = MEDIA_TYPE_DCM_SUMMARY
+        elif accept_item == MEDIA_TYPE_SUMMARY:
+            items = [revision_model_to_summary(r) for r in revisions]
+            media_type = MEDIA_TYPE_SUMMARY
+        else:
+            items = [revision_model_to_response(r) for r in revisions]
+            media_type = MEDIA_TYPE_COLLECTION
+
+        collection = {
+            "items": items,
+            "start": start,
+            "limit": limit,
+            "count": count,
+            "links": generate_revision_collection_links(definition_id, start, limit, count),
+        }
+
+        return JSONResponse(content=collection, media_type=media_type)
+
+
+def _resolve_revision_alias(alias: str):
+    """Return a filter predicate for @current / @active aliases, or None if regular id."""
+    if alias == "@current":
+        return None, "current"
+    if alias == "@active":
+        return None, "active"
+    try:
+        return int(alias), None
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail=f"Invalid revision id: {alias}")
+
+
+@app.get(
+    f"{BASE_URI}/{{definition_id}}/revisions/{{revision_id}}",
+    responses={
+        200: {
+            "content": {
+                MEDIA_TYPE_REVISION: {},
+                MEDIA_TYPE_SUMMARY: {},
+                MEDIA_TYPE_DCM_SUMMARY: {},
+            },
+            "description": "A treatment definition revision",
+        },
+        404: {"description": "Definition or revision not found"},
+    },
+)
+async def get_revision(
+    definition_id: int,
+    revision_id: str,
+    request: Request,
+    accept_item: Optional[str] = Header(None, alias="Accept-Item"),
+):
+    async with async_session() as db:
+        def_query = select(TreatmentDefinition.id).where(TreatmentDefinition.id == definition_id)
+        def_result = await db.execute(def_query)
+        if not def_result.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="Definition not found")
+
+        base_query = select(TreatmentDefinitionRevision).options(
+            selectinload(TreatmentDefinitionRevision.attributes).selectinload(RevisionAttribute.valueConstraints)
+        ).where(TreatmentDefinitionRevision.treatment_definition_id == definition_id)
+
+        resolved_id, alias = _resolve_revision_alias(revision_id)
+
+        if alias == "active":
+            query = base_query.where(TreatmentDefinitionRevision.isActive.is_(True)).order_by(
+                TreatmentDefinitionRevision.majorRevision.desc(),
+                TreatmentDefinitionRevision.minorRevision.desc(),
+            )
+        elif alias == "current":
+            query = base_query.order_by(
+                TreatmentDefinitionRevision.majorRevision.desc(),
+                TreatmentDefinitionRevision.minorRevision.desc(),
+                TreatmentDefinitionRevision.id.desc(),
+            )
+        else:
+            query = base_query.where(TreatmentDefinitionRevision.id == resolved_id)
+
+        query = query.limit(1)
+        result = await db.execute(query)
+        revision = result.scalar_one_or_none()
+
+        if not revision:
+            raise HTTPException(status_code=404, detail="Revision not found")
+
+        url_fragment = request.url.fragment if request.url.fragment else None
+
+        if url_fragment == "revisionSummary" or accept_item == MEDIA_TYPE_DCM_SUMMARY:
+            data = revision_model_to_revision_summary(revision)
+            media_type = MEDIA_TYPE_DCM_SUMMARY
+        elif url_fragment == "summary" or accept_item == MEDIA_TYPE_SUMMARY:
+            data = revision_model_to_summary(revision)
+            media_type = MEDIA_TYPE_SUMMARY
+        else:
+            data = revision_model_to_response(revision)
+            media_type = MEDIA_TYPE_REVISION
+
+        return JSONResponse(content=data, media_type=media_type)
+
+
+@app.post(
+    f"{BASE_URI}/{{definition_id}}/revisions",
+    status_code=201,
+    responses={
+        201: {
+            "content": {MEDIA_TYPE_REVISION: {}},
+            "description": "Created treatment definition revision",
+        },
+        400: {"description": "Invalid input"},
+        404: {"description": "Definition not found"},
+    },
+)
+async def create_revision(
+    definition_id: int,
+    revision_create: Optional[RevisionCreate] = None,
+    request: Request = None,
+):
+    try:
+        async with async_session() as db:
+            def_query = select(TreatmentDefinition).options(
+                selectinload(TreatmentDefinition.attributes).selectinload(Attribute.valueConstraints)
+            ).where(TreatmentDefinition.id == definition_id)
+            def_result = await db.execute(def_query)
+            definition = def_result.scalar_one_or_none()
+            if not definition:
+                raise HTTPException(status_code=404, detail="Definition not found")
+
+            revision_type = "minor"
+            from_revision_uri = None
+            override_name = None
+            override_description = None
+            source_revision = None
+
+            if revision_create is not None:
+                revision_type = revision_create.revisionType or "minor"
+                from_revision_uri = revision_create.fromRevisionUri
+                override_name = revision_create.name
+                override_description = revision_create.description
+
+            if from_revision_uri:
+                rev_result = await db.execute(
+                    select(TreatmentDefinitionRevision).options(
+                        selectinload(TreatmentDefinitionRevision.attributes).selectinload(RevisionAttribute.valueConstraints)
+                    ).where(TreatmentDefinitionRevision.fromRevisionUri == from_revision_uri)
+                )
+                source_revision = rev_result.scalar_one_or_none()
+
+            if source_revision:
+                source_major = source_revision.majorRevision or 1
+                source_minor = source_revision.minorRevision or 0
+            else:
+                max_result = await db.execute(
+                    select(
+                        func.max(TreatmentDefinitionRevision.majorRevision),
+                        func.max(TreatmentDefinitionRevision.minorRevision),
+                    ).where(TreatmentDefinitionRevision.treatment_definition_id == definition_id)
+                )
+                row = max_result.one()
+                max_major, max_minor = row
+                if max_major is None:
+                    source_major = definition.majorRevision or 1
+                    source_minor = definition.minorRevision or 0
+                else:
+                    source_major = max_major
+                    source_minor = max_minor or 0
+
+            if revision_type == "major":
+                new_major = source_major + 1
+                new_minor = 0
+            else:
+                new_major = source_major
+                new_minor = source_minor + 1
+
+            new_rev = TreatmentDefinitionRevision(
+                treatment_definition_id=definition_id,
+                name=override_name or definition.name,
+                description=override_description or definition.description,
+                createdBy="system",
+                modifiedBy="system",
+                majorRevision=new_major,
+                minorRevision=new_minor,
+                checkout=False,
+                locked=definition.locked or False,
+                status=definition.status or "valid",
+                folderType=definition.folderType,
+                sourceRevisionUri=definition.sourceRevisionUri,
+                copyTimeStamp=definition.copyTimeStamp,
+                fromRevisionUri=from_revision_uri,
+                isActive=False,
+            )
+            db.add(new_rev)
+            await db.flush()
+
+            if source_revision and source_revision.attributes:
+                await create_revision_attributes_from_source(db, new_rev.id, list(source_revision.attributes))
+            else:
+                await create_revision_attributes_from_source(db, new_rev.id, list(definition.attributes))
+
+            await db.commit()
+            new_rev_id = new_rev.id
+
+        async with async_session() as db:
+            query = select(TreatmentDefinitionRevision).options(
+                selectinload(TreatmentDefinitionRevision.attributes).selectinload(RevisionAttribute.valueConstraints)
+            ).where(TreatmentDefinitionRevision.id == new_rev_id)
+            result = await db.execute(query)
+            created = result.scalar_one()
+
+            data = revision_model_to_response(created)
+            response = JSONResponse(
+                content=data,
+                status_code=201,
+                media_type=MEDIA_TYPE_REVISION,
+            )
+            response.headers["Location"] = revision_uri(definition_id, created.id)
+            return response
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete(
+    f"{BASE_URI}/{{definition_id}}/revisions/{{revision_id}}",
+    status_code=204,
+    responses={
+        204: {"description": "Revision deleted successfully"},
+        404: {"description": "Definition or revision not found"},
+    },
+)
+async def delete_revision(
+    definition_id: int,
+    revision_id: int,
+    request: Request,
+):
+    try:
+        async with async_session() as db:
+            def_query = select(TreatmentDefinition.id).where(TreatmentDefinition.id == definition_id)
+            def_result = await db.execute(def_query)
+            if not def_result.scalar_one_or_none():
+                raise HTTPException(status_code=404, detail="Definition not found")
+
+            query = select(TreatmentDefinitionRevision).where(
+                TreatmentDefinitionRevision.id == revision_id,
+                TreatmentDefinitionRevision.treatment_definition_id == definition_id,
+            )
+            result = await db.execute(query)
+            existing = result.scalar_one_or_none()
+            if not existing:
+                raise HTTPException(status_code=404, detail="Revision not found")
+
+            await db.execute(delete(RevisionValueConstraint).where(
+                RevisionValueConstraint.attribute_id.in_(
+                    select(RevisionAttribute.id).where(RevisionAttribute.revision_id == revision_id)
+                )
+            ))
+            await db.execute(delete(RevisionAttribute).where(RevisionAttribute.revision_id == revision_id))
+            await db.execute(delete(CheckOut).where(CheckOut.revision_id == revision_id))
+            await db.delete(existing)
+            await db.commit()
+
+            return Response(status_code=204)
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get(
+    f"{BASE_URI}/{{definition_id}}/revisions/{{revision_id}}/checkOuts",
+    responses={
+        200: {
+            "content": {MEDIA_TYPE_COLLECTION: {}},
+            "description": "Check-outs associated with the revision",
+        },
+        404: {"description": "Definition or revision not found"},
+    },
+)
+async def get_revision_checkouts(
+    definition_id: int,
+    revision_id: int,
+    request: Request,
+):
+    async with async_session() as db:
+        def_query = select(TreatmentDefinition.id).where(TreatmentDefinition.id == definition_id)
+        def_result = await db.execute(def_query)
+        if not def_result.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="Definition not found")
+
+        rev_query = select(TreatmentDefinitionRevision.id).where(
+            TreatmentDefinitionRevision.id == revision_id,
+            TreatmentDefinitionRevision.treatment_definition_id == definition_id,
+        )
+        rev_result = await db.execute(rev_query)
+        if not rev_result.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="Revision not found")
+
+        query = select(CheckOut).where(CheckOut.revision_id == revision_id)
+        result = await db.execute(query)
+        checkouts = result.scalars().all()
+
+        items = []
+        for co in checkouts:
+            uri = revision_uri(definition_id, revision_id)
+            items.append({
+                "id": co.id,
+                "workingCopyId": co.working_copy_id,
+                "checkedBy": co.checkedBy,
+                "checkTimeStamp": co.checkTimeStamp.isoformat() if co.checkTimeStamp else None,
+                "links": [
+                    link_to_dict(Link(rel="self", href=f"{uri}/checkOuts/{co.id}", method="GET")),
+                    link_to_dict(Link(rel="up", href=uri, method="GET", type=MEDIA_TYPE_REVISION)),
+                ],
+            })
+
+        uri = revision_uri(definition_id, revision_id)
+        collection = {
+            "items": items,
+            "start": 0,
+            "limit": len(items),
+            "count": len(items),
+            "links": [
+                link_to_dict(Link(rel="self", href=f"{uri}/checkOuts", method="GET", type=MEDIA_TYPE_COLLECTION)),
+                link_to_dict(Link(rel="up", href=uri, method="GET", type=MEDIA_TYPE_REVISION)),
+            ],
+        }
+        return JSONResponse(content=collection, media_type=MEDIA_TYPE_COLLECTION)
+
+
+# ------------------------- Batch query API -------------------------
+
+
+@app.post(
+    "/treatmentDefinition/definitionRevisions",
+    responses={
+        200: {
+            "content": {MEDIA_TYPE_COLLECTION: {}},
+            "description": "Batch query result for revisions",
+        },
+        400: {"description": "Invalid input"},
+    },
+)
+async def batch_query_revisions(
+    body: RevisionBatchQuery,
+    request: Request,
+    accept_item: Optional[str] = Header(None, alias="Accept-Item"),
+):
+    try:
+        ids = body.selection.resources or []
+        if not ids:
+            collection = {
+                "items": [],
+                "start": 0,
+                "limit": 0,
+                "count": 0,
+                "links": [
+                    link_to_dict(Link(rel="self", href="/treatmentDefinition/definitionRevisions", method="POST", type=MEDIA_TYPE_COLLECTION)),
+                ],
+            }
+            return JSONResponse(content=collection, media_type=MEDIA_TYPE_COLLECTION)
+
+        async with async_session() as db:
+            query = select(TreatmentDefinitionRevision).options(
+                selectinload(TreatmentDefinitionRevision.attributes).selectinload(RevisionAttribute.valueConstraints)
+            ).where(TreatmentDefinitionRevision.id.in_(ids))
+            result = await db.execute(query)
+            revisions = result.scalars().all()
+
+            if accept_item == MEDIA_TYPE_DCM_SUMMARY:
+                items = [revision_model_to_revision_summary(r) for r in revisions]
+                media_type = MEDIA_TYPE_DCM_SUMMARY
+            elif accept_item == MEDIA_TYPE_SUMMARY:
+                items = [revision_model_to_summary(r) for r in revisions]
+                media_type = MEDIA_TYPE_SUMMARY
+            else:
+                items = [revision_model_to_response(r) for r in revisions]
+                media_type = MEDIA_TYPE_COLLECTION
+
+            collection = {
+                "items": items,
+                "start": 0,
+                "limit": len(items),
+                "count": len(items),
+                "links": [
+                    link_to_dict(Link(rel="self", href="/treatmentDefinition/definitionRevisions", method="POST", type=MEDIA_TYPE_COLLECTION)),
+                ],
+            }
+            return JSONResponse(content=collection, media_type=media_type)
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=400, detail=str(e))

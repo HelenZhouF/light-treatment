@@ -138,3 +138,19 @@ class TreatmentDefinitionRoot(BaseModel):
                 ]
             }
         }
+
+
+class RevisionCreate(BaseModel):
+    revisionType: Optional[str] = Field("minor", pattern="^(major|minor)$")
+    fromRevisionUri: Optional[str] = None
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+
+class RevisionSelection(BaseModel):
+    type: str = Field("id", pattern="^id$")
+    resources: List[int]
+
+
+class RevisionBatchQuery(BaseModel):
+    selection: RevisionSelection
