@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete, and_, or_
 from sqlalchemy.orm import selectinload
 from typing import Optional
+from datetime import datetime
 import json
 import traceback
 import re
@@ -13,6 +14,12 @@ from app.database import init_db, async_session
 from app.models import TreatmentDefinition, Attribute, ValueConstraint
 from app.models import TreatmentDefinitionRevision, RevisionAttribute, RevisionValueConstraint, CheckOut
 from app.models import TreatmentDefinitionGroup, GroupMember, AttributeValueMapping, AttributeNameAlias
+from app.models import (
+    TreatmentDefinitionGroupRevision,
+    GroupRevisionMember,
+    GroupRevisionAttributeValueMapping,
+    GroupRevisionAttributeNameAlias,
+)
 from app.schemas import (
     TreatmentDefinitionRoot,
     TreatmentDefinitionCreate,
@@ -22,6 +29,8 @@ from app.schemas import (
     RevisionBatchQuery,
     TreatmentDefinitionGroupCreate,
     TreatmentDefinitionGroupUpdate,
+    GroupRevisionCreate,
+    GroupRevisionActivateRequest,
 )
 
 app = FastAPI(
@@ -56,9 +65,10 @@ MEDIA_TYPE_DCM_SUMMARY = "application/vnd.sas.dcm.summary+json"
 MEDIA_TYPE_ROOT = "application/vnd.sas.api"
 MEDIA_TYPE_REVISION = "application/vnd.sas.treatment.definition+json"
 MEDIA_TYPE_GROUP = "application/vnd.sas.treatment.definition.group+json"
+MEDIA_TYPE_GROUP_REVISION = "application/vnd.sas.treatment.definition.group+json"
 MEDIA_TYPE_REVISION_SUMMARY = "application/vnd.sas.revision.summary+json"
 MEDIA_TYPE_GROUP_SUMMARY = "application/vnd.sas.treatment.definition.group.summary+json"
-MEDIA_TYPE_GROUP_REVISION_SUMMARY = "application/vnd.sas.treatment.definition.group.revisionSummary+json"
+MEDIA_TYPE_GROUP_REVISION_SUMMARY = "application/vnd.sas.dcm.summary+json"
 
 
 BASE_URI = "/treatmentDefinition/definitions"
@@ -866,6 +876,7 @@ async def get_revisions(
     limit: int = Query(10, ge=1, le=100, description="Maximum items to return"),
     filter: Optional[str] = Query(None, description="Filter criteria (e.g., eq(status,'valid'))"),
     sortedBy: Optional[str] = Query(None, description="Sort by field (e.g., -majorRevision, creationTimeStamp:descending)"),
+    view: Optional[str] = Query(None, description="View type: summary or revisionSummary"),
     accept_item: Optional[str] = Header(None, alias="Accept-Item"),
 ):
     async with async_session() as db:
@@ -912,15 +923,25 @@ async def get_revisions(
         result = await db.execute(query)
         revisions = result.scalars().all()
 
-        if accept_item == MEDIA_TYPE_DCM_SUMMARY:
-            items = [revision_model_to_revision_summary(r) for r in revisions]
-            media_type = MEDIA_TYPE_DCM_SUMMARY
-        elif accept_item == MEDIA_TYPE_SUMMARY:
-            items = [revision_model_to_summary(r) for r in revisions]
-            media_type = MEDIA_TYPE_SUMMARY
-        else:
-            items = [revision_model_to_response(r) for r in revisions]
+        accept_item_fields = parse_accept_item_fields(accept_item)
+
+        if accept_item_fields:
+            raw_items = [revision_model_to_response(r) for r in revisions]
+            items = [filter_dict_fields(item, accept_item_fields) for item in raw_items]
             media_type = MEDIA_TYPE_COLLECTION
+        else:
+            is_revision_summary = (view == "revisionSummary") or (accept_item == MEDIA_TYPE_DCM_SUMMARY)
+            is_summary = (view == "summary") or (accept_item == MEDIA_TYPE_SUMMARY)
+
+            if is_revision_summary:
+                items = [revision_model_to_revision_summary(r) for r in revisions]
+                media_type = MEDIA_TYPE_DCM_SUMMARY
+            elif is_summary:
+                items = [revision_model_to_summary(r) for r in revisions]
+                media_type = MEDIA_TYPE_SUMMARY
+            else:
+                items = [revision_model_to_response(r) for r in revisions]
+                media_type = MEDIA_TYPE_COLLECTION
 
         collection = {
             "items": items,
@@ -963,12 +984,14 @@ async def get_revision(
     definition_id: int,
     revision_id: str,
     request: Request,
+    view: Optional[str] = Query(None, description="View type: summary or revisionSummary"),
     accept_item: Optional[str] = Header(None, alias="Accept-Item"),
 ):
     async with async_session() as db:
-        def_query = select(TreatmentDefinition.id).where(TreatmentDefinition.id == definition_id)
+        def_query = select(TreatmentDefinition).where(TreatmentDefinition.id == definition_id)
         def_result = await db.execute(def_query)
-        if not def_result.scalar_one_or_none():
+        definition = def_result.scalar_one_or_none()
+        if not definition:
             raise HTTPException(status_code=404, detail="Definition not found")
 
         base_query = select(TreatmentDefinitionRevision).options(
@@ -1000,17 +1023,29 @@ async def get_revision(
 
         url_fragment = request.url.fragment if request.url.fragment else None
 
-        if url_fragment == "revisionSummary" or accept_item == MEDIA_TYPE_DCM_SUMMARY:
-            data = revision_model_to_revision_summary(revision)
-            media_type = MEDIA_TYPE_DCM_SUMMARY
-        elif url_fragment == "summary" or accept_item == MEDIA_TYPE_SUMMARY:
-            data = revision_model_to_summary(revision)
-            media_type = MEDIA_TYPE_SUMMARY
-        else:
-            data = revision_model_to_response(revision)
-            media_type = MEDIA_TYPE_REVISION
+        accept_item_fields = parse_accept_item_fields(accept_item)
 
-        return JSONResponse(content=data, media_type=media_type)
+        if accept_item_fields:
+            data = revision_model_to_response(revision)
+            data = filter_dict_fields(data, accept_item_fields)
+            media_type = MEDIA_TYPE_REVISION
+        else:
+            is_revision_summary = (url_fragment == "revisionSummary") or (view == "revisionSummary") or (accept_item == MEDIA_TYPE_DCM_SUMMARY)
+            is_summary = (url_fragment == "summary") or (view == "summary") or (accept_item == MEDIA_TYPE_SUMMARY)
+
+            if is_revision_summary:
+                data = revision_model_to_revision_summary(revision)
+                media_type = MEDIA_TYPE_DCM_SUMMARY
+            elif is_summary:
+                data = revision_model_to_summary(revision)
+                media_type = MEDIA_TYPE_SUMMARY
+            else:
+                data = revision_model_to_response(revision)
+                media_type = MEDIA_TYPE_REVISION
+
+        response = JSONResponse(content=data, media_type=media_type)
+        response.headers["ETag"] = str(definition.version)
+        return response
 
 
 @app.post(
@@ -1142,19 +1177,29 @@ async def create_revision(
     responses={
         204: {"description": "Revision deleted successfully"},
         404: {"description": "Definition or revision not found"},
+        412: {"description": "Precondition failed (ETag mismatch)"},
+        428: {"description": "Precondition required (If-Match header missing)"},
     },
 )
 async def delete_revision(
     definition_id: int,
     revision_id: int,
     request: Request,
+    if_match: Optional[str] = Header(None, alias="If-Match"),
 ):
     try:
+        if not if_match:
+            raise HTTPException(status_code=428, detail="If-Match header is required")
+
         async with async_session() as db:
-            def_query = select(TreatmentDefinition.id).where(TreatmentDefinition.id == definition_id)
+            def_query = select(TreatmentDefinition).where(TreatmentDefinition.id == definition_id)
             def_result = await db.execute(def_query)
-            if not def_result.scalar_one_or_none():
+            definition = def_result.scalar_one_or_none()
+            if not definition:
                 raise HTTPException(status_code=404, detail="Definition not found")
+
+            if str(definition.version) != if_match:
+                raise HTTPException(status_code=412, detail="ETag mismatch")
 
             query = select(TreatmentDefinitionRevision).where(
                 TreatmentDefinitionRevision.id == revision_id,
@@ -1173,6 +1218,7 @@ async def delete_revision(
             await db.execute(delete(RevisionAttribute).where(RevisionAttribute.revision_id == revision_id))
             await db.execute(delete(CheckOut).where(CheckOut.revision_id == revision_id))
             await db.delete(existing)
+            definition.version += 1
             await db.commit()
 
             return Response(status_code=204)
@@ -1323,6 +1369,8 @@ def generate_group_links(group_id: int) -> list[dict]:
         link_to_dict(Link(rel="update", href=f"{GROUP_BASE_URI}/{group_id}", method="PUT", type=MEDIA_TYPE_GROUP)),
         link_to_dict(Link(rel="delete", href=f"{GROUP_BASE_URI}/{group_id}", method="DELETE")),
         link_to_dict(Link(rel="dependencies", href=f"{GROUP_BASE_URI}/{group_id}/dependencies", method="GET")),
+        link_to_dict(Link(rel="revisions", href=f"{GROUP_BASE_URI}/{group_id}/revisions", method="GET", type=MEDIA_TYPE_COLLECTION)),
+        link_to_dict(Link(rel="active", href=f"{GROUP_BASE_URI}/{group_id}/active", method="PUT", type=MEDIA_TYPE_GROUP_REVISION)),
     ]
 
 
@@ -1815,3 +1863,835 @@ async def get_group_dependencies(
         }
 
         return JSONResponse(content=collection, media_type=MEDIA_TYPE_COLLECTION)
+
+
+# ------------------------- Group Revision helpers -------------------------
+
+
+def parse_accept_item_fields(accept_item: Optional[str]) -> Optional[list[str]]:
+    if not accept_item:
+        return None
+    if "," in accept_item and "/" not in accept_item:
+        return [f.strip() for f in accept_item.split(",") if f.strip()]
+    return None
+
+
+def filter_dict_fields(data: dict, fields: list[str]) -> dict:
+    return {k: data[k] for k in fields if k in data}
+
+
+def group_revision_uri(group_id: int, revision_id=None) -> str:
+    if revision_id is None:
+        return f"{GROUP_BASE_URI}/{group_id}/revisions"
+    return f"{GROUP_BASE_URI}/{group_id}/revisions/{revision_id}"
+
+
+def generate_group_revision_links(group_id: int, revision_id: int) -> list[dict]:
+    uri = group_revision_uri(group_id, revision_id)
+    return [
+        link_to_dict(Link(rel="self", href=uri, method="GET", type=MEDIA_TYPE_GROUP_REVISION)),
+        link_to_dict(Link(rel="up", href=group_revision_uri(group_id), method="GET", type=MEDIA_TYPE_COLLECTION)),
+        link_to_dict(Link(rel="alternate", href=f"{uri}#summary", method="GET", type=MEDIA_TYPE_SUMMARY)),
+        link_to_dict(Link(rel="alternate", href=f"{uri}#revisionSummary", method="GET", type=MEDIA_TYPE_GROUP_REVISION_SUMMARY)),
+        link_to_dict(Link(rel="delete", href=uri, method="DELETE")),
+        link_to_dict(Link(rel="checkOuts", href=f"{uri}/checkOuts", method="GET", type=MEDIA_TYPE_COLLECTION)),
+        link_to_dict(Link(rel="activate", href=f"{GROUP_BASE_URI}/{group_id}/active", method="PUT", type=MEDIA_TYPE_GROUP_REVISION)),
+    ]
+
+
+def generate_group_revision_collection_links(group_id: int, start: int, limit: int, count: int) -> list[dict]:
+    uri = group_revision_uri(group_id)
+    links = [
+        link_to_dict(Link(rel="self", href=f"{uri}?start={start}&limit={limit}", method="GET", type=MEDIA_TYPE_COLLECTION)),
+        link_to_dict(Link(rel="up", href=f"{GROUP_BASE_URI}/{group_id}", method="GET", type=MEDIA_TYPE_GROUP)),
+        link_to_dict(Link(rel="create", href=uri, method="POST", type=MEDIA_TYPE_GROUP_REVISION)),
+    ]
+    if start + limit < count:
+        links.append(
+            link_to_dict(Link(
+                rel="next",
+                href=f"{uri}?start={start + limit}&limit={limit}",
+                method="GET",
+                type=MEDIA_TYPE_COLLECTION,
+            ))
+        )
+    if start > 0:
+        prev_start = max(0, start - limit)
+        links.append(
+            link_to_dict(Link(
+                rel="prev",
+                href=f"{uri}?start={prev_start}&limit={limit}",
+                method="GET",
+                type=MEDIA_TYPE_COLLECTION,
+            ))
+        )
+    return links
+
+
+def group_revision_model_to_response(rev: TreatmentDefinitionGroupRevision) -> dict:
+    data = {
+        "id": rev.id,
+        "name": rev.name,
+        "description": rev.description,
+        "createdBy": rev.createdBy,
+        "creationTimeStamp": rev.creationTimeStamp.isoformat() if rev.creationTimeStamp else None,
+        "modifiedBy": rev.modifiedBy,
+        "modifiedTimeStamp": rev.modifiedTimeStamp.isoformat() if rev.modifiedTimeStamp else None,
+        "majorRevision": rev.majorRevision,
+        "minorRevision": rev.minorRevision,
+        "checkout": rev.checkout,
+        "locked": rev.locked,
+        "status": rev.status,
+        "activationStatus": rev.activationStatus,
+        "activationError": rev.activationError,
+        "activatedTimeStamp": rev.activatedTimeStamp.isoformat() if rev.activatedTimeStamp else None,
+        "parentFolderUri": rev.parentFolderUri,
+        "fromRevisionUri": rev.fromRevisionUri,
+        "members": [],
+        "links": generate_group_revision_links(rev.group_id, rev.id),
+    }
+    for member in rev.members:
+        member_data = {
+            "id": member.id,
+            "definitionId": member.definitionId,
+            "definitionRevisionId": member.definitionRevisionId,
+            "definitionRevisionName": member.definitionRevisionName,
+            "attributeValueMappings": [],
+            "attributeNameAliases": [],
+        }
+        for avm in member.attributeValueMappings:
+            member_data["attributeValueMappings"].append({
+                "id": avm.id,
+                "attributeId": avm.attributeId,
+                "attributeName": avm.attributeName,
+                "mappingType": avm.mappingType,
+                "value": avm.value,
+            })
+        for ana in member.attributeNameAliases:
+            member_data["attributeNameAliases"].append({
+                "id": ana.id,
+                "attributeId": ana.attributeId,
+                "attributeName": ana.attributeName,
+                "aliasName": ana.aliasName,
+            })
+        data["members"].append(member_data)
+    return data
+
+
+def group_revision_model_to_summary(rev: TreatmentDefinitionGroupRevision) -> dict:
+    return {
+        "id": rev.id,
+        "name": rev.name,
+        "description": rev.description,
+        "createdBy": rev.createdBy,
+        "creationTimeStamp": rev.creationTimeStamp.isoformat() if rev.creationTimeStamp else None,
+        "modifiedBy": rev.modifiedBy,
+        "modifiedTimeStamp": rev.modifiedTimeStamp.isoformat() if rev.modifiedTimeStamp else None,
+        "majorRevision": rev.majorRevision,
+        "minorRevision": rev.minorRevision,
+        "checkout": rev.checkout,
+        "locked": rev.locked,
+        "status": rev.status,
+        "activationStatus": rev.activationStatus,
+        "activationError": rev.activationError,
+        "activatedTimeStamp": rev.activatedTimeStamp.isoformat() if rev.activatedTimeStamp else None,
+        "links": generate_group_revision_links(rev.group_id, rev.id),
+    }
+
+
+def group_revision_model_to_revision_summary(rev: TreatmentDefinitionGroupRevision) -> dict:
+    return {
+        "id": rev.id,
+        "name": rev.name,
+        "majorRevision": rev.majorRevision,
+        "minorRevision": rev.minorRevision,
+        "status": rev.status,
+        "activationStatus": rev.activationStatus,
+        "links": generate_group_revision_links(rev.group_id, rev.id),
+    }
+
+
+async def create_group_revision_members_from_source(
+    db: AsyncSession,
+    revision_id: int,
+    source_members: list,
+):
+    for src_member in source_members:
+        member = GroupRevisionMember(
+            revision_id=revision_id,
+            definitionId=src_member.definitionId,
+            definitionRevisionId=src_member.definitionRevisionId,
+            definitionRevisionName=src_member.definitionRevisionName,
+        )
+        db.add(member)
+        await db.flush()
+
+        if src_member.attributeValueMappings:
+            for src_avm in src_member.attributeValueMappings:
+                avm = GroupRevisionAttributeValueMapping(
+                    member_id=member.id,
+                    attributeId=src_avm.attributeId,
+                    attributeName=src_avm.attributeName,
+                    mappingType=src_avm.mappingType,
+                    value=src_avm.value,
+                )
+                db.add(avm)
+
+        if src_member.attributeNameAliases:
+            for src_ana in src_member.attributeNameAliases:
+                ana = GroupRevisionAttributeNameAlias(
+                    member_id=member.id,
+                    attributeId=src_ana.attributeId,
+                    attributeName=src_ana.attributeName,
+                    aliasName=src_ana.aliasName,
+                )
+                db.add(ana)
+
+
+# ------------------------- Group Revision API -------------------------
+
+
+@app.get(
+    f"{GROUP_BASE_URI}/{{group_id}}/revisions",
+    responses={
+        200: {
+            "content": {
+                MEDIA_TYPE_COLLECTION: {},
+                MEDIA_TYPE_SUMMARY: {},
+                MEDIA_TYPE_GROUP_REVISION_SUMMARY: {},
+            },
+            "description": "Collection of treatment definition group revisions",
+        },
+        404: {"description": "Group not found"},
+    },
+)
+async def get_group_revisions(
+    group_id: int,
+    request: Request,
+    start: int = Query(0, ge=0, description="Start index for pagination"),
+    limit: int = Query(10, ge=1, le=100, description="Maximum items to return"),
+    filter: Optional[str] = Query(None, description="Filter criteria (e.g., eq(status,'valid'))"),
+    sortedBy: Optional[str] = Query(None, description="Sort by field (e.g., -majorRevision, creationTimeStamp:descending)"),
+    view: Optional[str] = Query(None, description="View type: summary or revisionSummary"),
+    accept_item: Optional[str] = Header(None, alias="Accept-Item"),
+):
+    async with async_session() as db:
+        group_query = select(TreatmentDefinitionGroup.id).where(TreatmentDefinitionGroup.id == group_id)
+        group_result = await db.execute(group_query)
+        if not group_result.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="Group not found")
+
+    try:
+        parsed_filters = parse_filter(filter) if filter else []
+    except FilterParseError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    async with async_session() as db:
+        query = select(TreatmentDefinitionGroupRevision).options(
+            selectinload(TreatmentDefinitionGroupRevision.members)
+            .selectinload(GroupRevisionMember.attributeValueMappings),
+            selectinload(TreatmentDefinitionGroupRevision.members)
+            .selectinload(GroupRevisionMember.attributeNameAliases),
+        ).where(TreatmentDefinitionGroupRevision.group_id == group_id)
+
+        if filter:
+            query = apply_filters(query, parsed_filters, TreatmentDefinitionGroupRevision)
+
+        if sortedBy:
+            sort_field, direction = parse_sort_by(sortedBy)
+            if sort_field and hasattr(TreatmentDefinitionGroupRevision, sort_field):
+                column = getattr(TreatmentDefinitionGroupRevision, sort_field)
+                if direction == 'descending':
+                    query = query.order_by(column.desc())
+                else:
+                    query = query.order_by(column)
+            else:
+                query = query.order_by(TreatmentDefinitionGroupRevision.id)
+        else:
+            query = query.order_by(TreatmentDefinitionGroupRevision.id)
+
+        count_query = select(func.count()).select_from(TreatmentDefinitionGroupRevision).where(
+            TreatmentDefinitionGroupRevision.group_id == group_id
+        )
+        if filter:
+            count_query = apply_filters(count_query, parsed_filters, TreatmentDefinitionGroupRevision)
+        count_result = await db.execute(count_query)
+        count = count_result.scalar()
+
+        query = query.offset(start).limit(limit)
+        result = await db.execute(query)
+        revisions = result.scalars().all()
+
+        accept_item_fields = parse_accept_item_fields(accept_item)
+
+        if accept_item_fields:
+            raw_items = [group_revision_model_to_response(r) for r in revisions]
+            items = [filter_dict_fields(item, accept_item_fields) for item in raw_items]
+            media_type = MEDIA_TYPE_COLLECTION
+        else:
+            is_revision_summary = (view == "revisionSummary") or (accept_item == MEDIA_TYPE_GROUP_REVISION_SUMMARY)
+            is_summary = (view == "summary") or (accept_item == MEDIA_TYPE_SUMMARY)
+
+            if is_revision_summary:
+                items = [group_revision_model_to_revision_summary(r) for r in revisions]
+                media_type = MEDIA_TYPE_GROUP_REVISION_SUMMARY
+            elif is_summary:
+                items = [group_revision_model_to_summary(r) for r in revisions]
+                media_type = MEDIA_TYPE_SUMMARY
+            else:
+                items = [group_revision_model_to_response(r) for r in revisions]
+                media_type = MEDIA_TYPE_COLLECTION
+
+        collection = {
+            "items": items,
+            "start": start,
+            "limit": limit,
+            "count": count,
+            "links": generate_group_revision_collection_links(group_id, start, limit, count),
+        }
+
+        return JSONResponse(content=collection, media_type=media_type)
+
+
+def _resolve_group_revision_alias(alias: str):
+    if alias == "@current":
+        return None, "current"
+    if alias == "@active":
+        return None, "active"
+    try:
+        return int(alias), None
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail=f"Invalid group revision id: {alias}")
+
+
+@app.get(
+    f"{GROUP_BASE_URI}/{{group_id}}/revisions/{{revision_id}}",
+    responses={
+        200: {
+            "content": {
+                MEDIA_TYPE_GROUP_REVISION: {},
+                MEDIA_TYPE_SUMMARY: {},
+                MEDIA_TYPE_GROUP_REVISION_SUMMARY: {},
+            },
+            "description": "A treatment definition group revision",
+        },
+        404: {"description": "Group or revision not found"},
+    },
+)
+async def get_group_revision(
+    group_id: int,
+    revision_id: str,
+    request: Request,
+    view: Optional[str] = Query(None, description="View type: summary or revisionSummary"),
+    accept_item: Optional[str] = Header(None, alias="Accept-Item"),
+):
+    async with async_session() as db:
+        group_query = select(TreatmentDefinitionGroup).where(TreatmentDefinitionGroup.id == group_id)
+        group_result = await db.execute(group_query)
+        group = group_result.scalar_one_or_none()
+        if not group:
+            raise HTTPException(status_code=404, detail="Group not found")
+
+        base_query = select(TreatmentDefinitionGroupRevision).options(
+            selectinload(TreatmentDefinitionGroupRevision.members)
+            .selectinload(GroupRevisionMember.attributeValueMappings),
+            selectinload(TreatmentDefinitionGroupRevision.members)
+            .selectinload(GroupRevisionMember.attributeNameAliases),
+        ).where(TreatmentDefinitionGroupRevision.group_id == group_id)
+
+        resolved_id, alias = _resolve_group_revision_alias(revision_id)
+
+        if alias == "active":
+            query = base_query.where(
+                TreatmentDefinitionGroupRevision.activationStatus == "active"
+            ).order_by(
+                TreatmentDefinitionGroupRevision.majorRevision.desc(),
+                TreatmentDefinitionGroupRevision.minorRevision.desc(),
+            )
+        elif alias == "current":
+            query = base_query.order_by(
+                TreatmentDefinitionGroupRevision.majorRevision.desc(),
+                TreatmentDefinitionGroupRevision.minorRevision.desc(),
+                TreatmentDefinitionGroupRevision.id.desc(),
+            )
+        else:
+            query = base_query.where(TreatmentDefinitionGroupRevision.id == resolved_id)
+
+        query = query.limit(1)
+        result = await db.execute(query)
+        revision = result.scalar_one_or_none()
+
+        if not revision:
+            raise HTTPException(status_code=404, detail="Group revision not found")
+
+        url_fragment = request.url.fragment if request.url.fragment else None
+
+        accept_item_fields = parse_accept_item_fields(accept_item)
+
+        if accept_item_fields:
+            data = group_revision_model_to_response(revision)
+            data = filter_dict_fields(data, accept_item_fields)
+            media_type = MEDIA_TYPE_GROUP_REVISION
+        else:
+            is_revision_summary = (url_fragment == "revisionSummary") or (view == "revisionSummary") or (accept_item == MEDIA_TYPE_GROUP_REVISION_SUMMARY)
+            is_summary = (url_fragment == "summary") or (view == "summary") or (accept_item == MEDIA_TYPE_SUMMARY)
+
+            if is_revision_summary:
+                data = group_revision_model_to_revision_summary(revision)
+                media_type = MEDIA_TYPE_GROUP_REVISION_SUMMARY
+            elif is_summary:
+                data = group_revision_model_to_summary(revision)
+                media_type = MEDIA_TYPE_SUMMARY
+            else:
+                data = group_revision_model_to_response(revision)
+                media_type = MEDIA_TYPE_GROUP_REVISION
+
+        response = JSONResponse(content=data, media_type=media_type)
+        response.headers["ETag"] = str(group.version)
+        return response
+
+
+@app.post(
+    f"{GROUP_BASE_URI}/{{group_id}}/revisions",
+    status_code=201,
+    responses={
+        201: {
+            "content": {MEDIA_TYPE_GROUP_REVISION: {}},
+            "description": "Created treatment definition group revision",
+        },
+        400: {"description": "Invalid input"},
+        404: {"description": "Group not found"},
+    },
+)
+async def create_group_revision(
+    group_id: int,
+    revision_create: Optional[GroupRevisionCreate] = None,
+    request: Request = None,
+):
+    try:
+        async with async_session() as db:
+            group_query = select(TreatmentDefinitionGroup).options(
+                selectinload(TreatmentDefinitionGroup.members)
+                .selectinload(GroupMember.attributeValueMappings),
+                selectinload(TreatmentDefinitionGroup.members)
+                .selectinload(GroupMember.attributeNameAliases),
+            ).where(TreatmentDefinitionGroup.id == group_id)
+            group_result = await db.execute(group_query)
+            group = group_result.scalar_one_or_none()
+            if not group:
+                raise HTTPException(status_code=404, detail="Group not found")
+
+            revision_type = "minor"
+            from_revision_uri = None
+            override_name = None
+            override_description = None
+            source_group_revision = None
+            explicit_members = None
+
+            if revision_create is not None:
+                revision_type = revision_create.revisionType or "minor"
+                from_revision_uri = revision_create.fromRevisionUri
+                override_name = revision_create.name
+                override_description = revision_create.description
+                explicit_members = revision_create.members
+
+            if from_revision_uri:
+                rev_result = await db.execute(
+                    select(TreatmentDefinitionGroupRevision).options(
+                        selectinload(TreatmentDefinitionGroupRevision.members)
+                        .selectinload(GroupRevisionMember.attributeValueMappings),
+                        selectinload(TreatmentDefinitionGroupRevision.members)
+                        .selectinload(GroupRevisionMember.attributeNameAliases),
+                    ).where(TreatmentDefinitionGroupRevision.fromRevisionUri == from_revision_uri)
+                )
+                source_group_revision = rev_result.scalar_one_or_none()
+
+            if source_group_revision:
+                source_major = source_group_revision.majorRevision or 1
+                source_minor = source_group_revision.minorRevision or 0
+            else:
+                max_result = await db.execute(
+                    select(
+                        func.max(TreatmentDefinitionGroupRevision.majorRevision),
+                        func.max(TreatmentDefinitionGroupRevision.minorRevision),
+                    ).where(TreatmentDefinitionGroupRevision.group_id == group_id)
+                )
+                row = max_result.one()
+                max_major, max_minor = row
+                if max_major is None:
+                    source_major = group.majorRevision or 1
+                    source_minor = group.minorRevision or 0
+                else:
+                    source_major = max_major
+                    source_minor = max_minor or 0
+
+            if revision_type == "major":
+                new_major = source_major + 1
+                new_minor = 0
+            else:
+                new_major = source_major
+                new_minor = source_minor + 1
+
+            new_rev = TreatmentDefinitionGroupRevision(
+                group_id=group_id,
+                name=override_name or group.name,
+                description=override_description or group.description,
+                createdBy="system",
+                modifiedBy="system",
+                majorRevision=new_major,
+                minorRevision=new_minor,
+                checkout=False,
+                locked=group.locked or False,
+                status=group.status or "valid",
+                activationStatus="inactive",
+                parentFolderUri=group.parentFolderUri,
+                fromRevisionUri=from_revision_uri,
+            )
+            db.add(new_rev)
+            await db.flush()
+
+            if explicit_members:
+                for member_data in explicit_members:
+                    member = GroupRevisionMember(
+                        revision_id=new_rev.id,
+                        definitionId=member_data.definitionId,
+                        definitionRevisionId=member_data.definitionRevisionId,
+                        definitionRevisionName=member_data.definitionRevisionName,
+                    )
+                    db.add(member)
+                    await db.flush()
+
+                    if member_data.attributeValueMappings:
+                        for avm_data in member_data.attributeValueMappings:
+                            avm = GroupRevisionAttributeValueMapping(
+                                member_id=member.id,
+                                attributeId=avm_data.attributeId,
+                                attributeName=avm_data.attributeName,
+                                mappingType=avm_data.mappingType,
+                                value=avm_data.value,
+                            )
+                            db.add(avm)
+
+                    if member_data.attributeNameAliases:
+                        for ana_data in member_data.attributeNameAliases:
+                            ana = GroupRevisionAttributeNameAlias(
+                                member_id=member.id,
+                                attributeId=ana_data.attributeId,
+                                attributeName=ana_data.attributeName,
+                                aliasName=ana_data.aliasName,
+                            )
+                            db.add(ana)
+            elif source_group_revision:
+                await create_group_revision_members_from_source(
+                    db, new_rev.id, list(source_group_revision.members)
+                )
+            else:
+                await create_group_revision_members_from_source(
+                    db, new_rev.id, list(group.members)
+                )
+
+            await db.commit()
+            new_rev_id = new_rev.id
+
+        async with async_session() as db:
+            query = select(TreatmentDefinitionGroupRevision).options(
+                selectinload(TreatmentDefinitionGroupRevision.members)
+                .selectinload(GroupRevisionMember.attributeValueMappings),
+                selectinload(TreatmentDefinitionGroupRevision.members)
+                .selectinload(GroupRevisionMember.attributeNameAliases),
+            ).where(TreatmentDefinitionGroupRevision.id == new_rev_id)
+            result = await db.execute(query)
+            created = result.scalar_one()
+
+            data = group_revision_model_to_response(created)
+            response = JSONResponse(
+                content=data,
+                status_code=201,
+                media_type=MEDIA_TYPE_GROUP_REVISION,
+            )
+            response.headers["Location"] = group_revision_uri(group_id, created.id)
+            return response
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete(
+    f"{GROUP_BASE_URI}/{{group_id}}/revisions/{{revision_id}}",
+    status_code=204,
+    responses={
+        204: {"description": "Group revision deleted successfully"},
+        404: {"description": "Group or revision not found"},
+        412: {"description": "Precondition failed (ETag mismatch)"},
+        428: {"description": "Precondition required (If-Match header missing)"},
+    },
+)
+async def delete_group_revision(
+    group_id: int,
+    revision_id: int,
+    request: Request,
+    if_match: Optional[str] = Header(None, alias="If-Match"),
+):
+    try:
+        if not if_match:
+            raise HTTPException(status_code=428, detail="If-Match header is required")
+
+        async with async_session() as db:
+            group_query = select(TreatmentDefinitionGroup).where(TreatmentDefinitionGroup.id == group_id)
+            group_result = await db.execute(group_query)
+            group = group_result.scalar_one_or_none()
+            if not group:
+                raise HTTPException(status_code=404, detail="Group not found")
+
+            if str(group.version) != if_match:
+                raise HTTPException(status_code=412, detail="ETag mismatch")
+
+            query = select(TreatmentDefinitionGroupRevision).where(
+                TreatmentDefinitionGroupRevision.id == revision_id,
+                TreatmentDefinitionGroupRevision.group_id == group_id,
+            )
+            result = await db.execute(query)
+            existing = result.scalar_one_or_none()
+            if not existing:
+                raise HTTPException(status_code=404, detail="Group revision not found")
+
+            await db.execute(delete(GroupRevisionAttributeNameAlias).where(
+                GroupRevisionAttributeNameAlias.member_id.in_(
+                    select(GroupRevisionMember.id).where(GroupRevisionMember.revision_id == revision_id)
+                )
+            ))
+            await db.execute(delete(GroupRevisionAttributeValueMapping).where(
+                GroupRevisionAttributeValueMapping.member_id.in_(
+                    select(GroupRevisionMember.id).where(GroupRevisionMember.revision_id == revision_id)
+                )
+            ))
+            await db.execute(delete(GroupRevisionMember).where(GroupRevisionMember.revision_id == revision_id))
+            await db.delete(existing)
+            group.version += 1
+            await db.commit()
+
+            return Response(status_code=204)
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get(
+    f"{GROUP_BASE_URI}/{{group_id}}/revisions/{{revision_id}}/checkOuts",
+    responses={
+        200: {
+            "content": {MEDIA_TYPE_COLLECTION: {}},
+            "description": "Check-outs associated with the group revision",
+        },
+        404: {"description": "Group or revision not found"},
+    },
+)
+async def get_group_revision_checkouts(
+    group_id: int,
+    revision_id: int,
+    request: Request,
+):
+    async with async_session() as db:
+        group_query = select(TreatmentDefinitionGroup.id).where(TreatmentDefinitionGroup.id == group_id)
+        group_result = await db.execute(group_query)
+        if not group_result.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="Group not found")
+
+        rev_query = select(TreatmentDefinitionGroupRevision.id).where(
+            TreatmentDefinitionGroupRevision.id == revision_id,
+            TreatmentDefinitionGroupRevision.group_id == group_id,
+        )
+        rev_result = await db.execute(rev_query)
+        if not rev_result.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="Group revision not found")
+
+        uri = group_revision_uri(group_id, revision_id)
+        collection = {
+            "items": [],
+            "start": 0,
+            "limit": 0,
+            "count": 0,
+            "links": [
+                link_to_dict(Link(rel="self", href=f"{uri}/checkOuts", method="GET", type=MEDIA_TYPE_COLLECTION)),
+                link_to_dict(Link(rel="up", href=uri, method="GET", type=MEDIA_TYPE_GROUP_REVISION)),
+            ],
+        }
+        return JSONResponse(content=collection, media_type=MEDIA_TYPE_COLLECTION)
+
+
+@app.put(
+    f"{GROUP_BASE_URI}/{{group_id}}/active",
+    responses={
+        200: {
+            "content": {MEDIA_TYPE_GROUP_REVISION: {}},
+            "description": "Activated group revision",
+        },
+        400: {"description": "Invalid input"},
+        404: {"description": "Group or revision not found"},
+        409: {"description": "Conflict - revision not locked"},
+        412: {"description": "Precondition failed (ETag mismatch)"},
+        428: {"description": "Precondition required (If-Match header missing)"},
+    },
+)
+async def activate_group_revision(
+    group_id: int,
+    body: Optional[GroupRevisionActivateRequest] = None,
+    request: Request = None,
+    if_match: Optional[str] = Header(None, alias="If-Match"),
+):
+    try:
+        target_revision_id = None
+        if body is not None:
+            target_revision_id = body.id
+            if target_revision_id is None and body.uri:
+                uri_match = re.search(r"/revisions/(\d+)", body.uri)
+                if uri_match:
+                    target_revision_id = int(uri_match.group(1))
+
+        if target_revision_id is None:
+            raise HTTPException(status_code=400, detail="revision id or uri is required")
+
+        if not if_match:
+            raise HTTPException(status_code=428, detail="If-Match header is required")
+
+        async with async_session() as db:
+            group_query = select(TreatmentDefinitionGroup).where(TreatmentDefinitionGroup.id == group_id)
+            group_result = await db.execute(group_query)
+            group = group_result.scalar_one_or_none()
+            if not group:
+                raise HTTPException(status_code=404, detail="Group not found")
+
+            if if_match and str(group.version) != if_match:
+                raise HTTPException(status_code=412, detail="ETag mismatch")
+
+            rev_query = select(TreatmentDefinitionGroupRevision).options(
+                selectinload(TreatmentDefinitionGroupRevision.members)
+                .selectinload(GroupRevisionMember.attributeValueMappings),
+                selectinload(TreatmentDefinitionGroupRevision.members)
+                .selectinload(GroupRevisionMember.attributeNameAliases),
+            ).where(
+                TreatmentDefinitionGroupRevision.id == target_revision_id,
+                TreatmentDefinitionGroupRevision.group_id == group_id,
+            )
+            rev_result = await db.execute(rev_query)
+            revision = rev_result.scalar_one_or_none()
+            if not revision:
+                raise HTTPException(status_code=404, detail="Group revision not found")
+
+            if not revision.locked:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Revision must be locked before activation",
+                )
+
+            await db.execute(
+                TreatmentDefinitionGroupRevision.__table__.update()
+                .where(TreatmentDefinitionGroupRevision.group_id == group_id)
+                .values(activationStatus="inactive")
+            )
+
+            revision.activationStatus = "active"
+            revision.activatedTimeStamp = datetime.utcnow()
+            revision.activationError = None
+
+            group.activationStatus = "active"
+            group.activatedTimeStamp = revision.activatedTimeStamp
+            group.activationError = None
+            group.version = group.version + 1
+
+            await db.commit()
+            group_version = group.version
+            rev_id = revision.id
+
+        async with async_session() as db:
+            query = select(TreatmentDefinitionGroupRevision).options(
+                selectinload(TreatmentDefinitionGroupRevision.members)
+                .selectinload(GroupRevisionMember.attributeValueMappings),
+                selectinload(TreatmentDefinitionGroupRevision.members)
+                .selectinload(GroupRevisionMember.attributeNameAliases),
+            ).where(TreatmentDefinitionGroupRevision.id == rev_id)
+            result = await db.execute(query)
+            activated = result.scalar_one()
+
+            data = group_revision_model_to_response(activated)
+            response = JSONResponse(content=data, media_type=MEDIA_TYPE_GROUP_REVISION)
+            response.headers["ETag"] = str(group_version)
+            return response
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ------------------------- Group Revision batch query API -------------------------
+
+
+@app.post(
+    "/treatmentDefinition/definitionGroupRevisions",
+    responses={
+        200: {
+            "content": {MEDIA_TYPE_COLLECTION: {}},
+            "description": "Batch query result for group revisions",
+        },
+        400: {"description": "Invalid input"},
+    },
+)
+async def batch_query_group_revisions(
+    body: RevisionBatchQuery,
+    request: Request,
+    accept_item: Optional[str] = Header(None, alias="Accept-Item"),
+):
+    try:
+        ids = body.selection.resources or []
+        if not ids:
+            collection = {
+                "items": [],
+                "start": 0,
+                "limit": 0,
+                "count": 0,
+                "links": [
+                    link_to_dict(Link(rel="self", href="/treatmentDefinition/definitionGroupRevisions", method="POST", type=MEDIA_TYPE_COLLECTION)),
+                ],
+            }
+            return JSONResponse(content=collection, media_type=MEDIA_TYPE_COLLECTION)
+
+        async with async_session() as db:
+            query = select(TreatmentDefinitionGroupRevision).options(
+                selectinload(TreatmentDefinitionGroupRevision.members)
+                .selectinload(GroupRevisionMember.attributeValueMappings),
+                selectinload(TreatmentDefinitionGroupRevision.members)
+                .selectinload(GroupRevisionMember.attributeNameAliases),
+            ).where(TreatmentDefinitionGroupRevision.id.in_(ids))
+            result = await db.execute(query)
+            revisions = result.scalars().all()
+
+            if accept_item == MEDIA_TYPE_GROUP_REVISION_SUMMARY:
+                items = [group_revision_model_to_revision_summary(r) for r in revisions]
+                media_type = MEDIA_TYPE_GROUP_REVISION_SUMMARY
+            elif accept_item == MEDIA_TYPE_SUMMARY:
+                items = [group_revision_model_to_summary(r) for r in revisions]
+                media_type = MEDIA_TYPE_SUMMARY
+            else:
+                items = [group_revision_model_to_response(r) for r in revisions]
+                media_type = MEDIA_TYPE_COLLECTION
+
+            collection = {
+                "items": items,
+                "start": 0,
+                "limit": len(items),
+                "count": len(items),
+                "links": [
+                    link_to_dict(Link(rel="self", href="/treatmentDefinition/definitionGroupRevisions", method="POST", type=MEDIA_TYPE_COLLECTION)),
+                ],
+            }
+            return JSONResponse(content=collection, media_type=media_type)
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=400, detail=str(e))
