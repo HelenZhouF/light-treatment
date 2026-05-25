@@ -1,14 +1,19 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Float
+import uuid
+from sqlalchemy import Column, String, Text, DateTime, Boolean, ForeignKey
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
 from app.database import Base
 
 
+def generate_uuid():
+    return str(uuid.uuid4())
+
+
 class TreatmentDefinition(Base):
     __tablename__ = "treatment_definitions"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(String(36), primary_key=True, index=True, default=generate_uuid)
     name = Column(String(255), nullable=False, index=True)
     description = Column(Text, nullable=True)
 
@@ -17,8 +22,8 @@ class TreatmentDefinition(Base):
     modifiedBy = Column(String(255), nullable=True)
     modifiedTimeStamp = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    majorRevision = Column(Integer, default=1)
-    minorRevision = Column(Integer, default=0)
+    majorRevision = Column(String(10), default="1")
+    minorRevision = Column(String(10), default="0")
     checkout = Column(Boolean, default=False)
     locked = Column(Boolean, default=False)
     status = Column(String(50), default="valid")
@@ -26,7 +31,7 @@ class TreatmentDefinition(Base):
     sourceRevisionUri = Column(Text, nullable=True)
     copyTimeStamp = Column(DateTime, nullable=True)
 
-    version = Column(Integer, default=1)
+    version = Column(String(36), default=generate_uuid)
 
     attributes = relationship("Attribute", back_populates="treatment_definition", cascade="all, delete-orphan")
     revisions = relationship("TreatmentDefinitionRevision", back_populates="definition", cascade="all, delete-orphan")
@@ -35,8 +40,8 @@ class TreatmentDefinition(Base):
 class TreatmentDefinitionRevision(Base):
     __tablename__ = "treatment_definition_revisions"
 
-    id = Column(Integer, primary_key=True, index=True)
-    treatment_definition_id = Column(Integer, ForeignKey("treatment_definitions.id"), nullable=False, index=True)
+    id = Column(String(36), primary_key=True, index=True, default=generate_uuid)
+    treatment_definition_id = Column(String(36), ForeignKey("treatment_definitions.id"), nullable=False, index=True)
 
     name = Column(String(255), nullable=False, index=True)
     description = Column(Text, nullable=True)
@@ -46,8 +51,8 @@ class TreatmentDefinitionRevision(Base):
     modifiedBy = Column(String(255), nullable=True)
     modifiedTimeStamp = Column(DateTime, default=datetime.utcnow)
 
-    majorRevision = Column(Integer, default=1)
-    minorRevision = Column(Integer, default=0)
+    majorRevision = Column(String(10), default="1")
+    minorRevision = Column(String(10), default="0")
     checkout = Column(Boolean, default=False)
     locked = Column(Boolean, default=False)
     status = Column(String(50), default="valid")
@@ -66,8 +71,8 @@ class TreatmentDefinitionRevision(Base):
 class RevisionAttribute(Base):
     __tablename__ = "revision_attributes"
 
-    id = Column(Integer, primary_key=True, index=True)
-    revision_id = Column(Integer, ForeignKey("treatment_definition_revisions.id"), nullable=False)
+    id = Column(String(36), primary_key=True, index=True, default=generate_uuid)
+    revision_id = Column(String(36), ForeignKey("treatment_definition_revisions.id"), nullable=False)
     name = Column(String(255), nullable=False)
     defaultValue = Column(Text, nullable=True)
 
@@ -78,8 +83,8 @@ class RevisionAttribute(Base):
 class RevisionValueConstraint(Base):
     __tablename__ = "revision_value_constraints"
 
-    id = Column(Integer, primary_key=True, index=True)
-    attribute_id = Column(Integer, ForeignKey("revision_attributes.id"), nullable=False)
+    id = Column(String(36), primary_key=True, index=True, default=generate_uuid)
+    attribute_id = Column(String(36), ForeignKey("revision_attributes.id"), nullable=False)
 
     dataType = Column(String(50), nullable=False)
     format = Column(String(50), nullable=True)
@@ -97,9 +102,9 @@ class RevisionValueConstraint(Base):
 class CheckOut(Base):
     __tablename__ = "check_outs"
 
-    id = Column(Integer, primary_key=True, index=True)
-    revision_id = Column(Integer, ForeignKey("treatment_definition_revisions.id"), nullable=False, index=True)
-    working_copy_id = Column(Integer, ForeignKey("treatment_definitions.id"), nullable=True)
+    id = Column(String(36), primary_key=True, index=True, default=generate_uuid)
+    revision_id = Column(String(36), ForeignKey("treatment_definition_revisions.id"), nullable=False, index=True)
+    working_copy_id = Column(String(36), ForeignKey("treatment_definitions.id"), nullable=True)
     checkedBy = Column(String(255), nullable=True)
     checkTimeStamp = Column(DateTime, default=datetime.utcnow)
 
@@ -109,8 +114,8 @@ class CheckOut(Base):
 class Attribute(Base):
     __tablename__ = "attributes"
 
-    id = Column(Integer, primary_key=True, index=True)
-    treatment_definition_id = Column(Integer, ForeignKey("treatment_definitions.id"), nullable=False)
+    id = Column(String(36), primary_key=True, index=True, default=generate_uuid)
+    treatment_definition_id = Column(String(36), ForeignKey("treatment_definitions.id"), nullable=False)
     name = Column(String(255), nullable=False)
     defaultValue = Column(Text, nullable=True)
 
@@ -121,8 +126,8 @@ class Attribute(Base):
 class ValueConstraint(Base):
     __tablename__ = "value_constraints"
 
-    id = Column(Integer, primary_key=True, index=True)
-    attribute_id = Column(Integer, ForeignKey("attributes.id"), nullable=False)
+    id = Column(String(36), primary_key=True, index=True, default=generate_uuid)
+    attribute_id = Column(String(36), ForeignKey("attributes.id"), nullable=False)
 
     dataType = Column(String(50), nullable=False)
     format = Column(String(50), nullable=True)
@@ -140,7 +145,7 @@ class ValueConstraint(Base):
 class TreatmentDefinitionGroup(Base):
     __tablename__ = "treatment_definition_groups"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(String(36), primary_key=True, index=True, default=generate_uuid)
     name = Column(String(255), nullable=False, index=True)
     description = Column(Text, nullable=True)
 
@@ -149,8 +154,8 @@ class TreatmentDefinitionGroup(Base):
     modifiedBy = Column(String(255), nullable=True)
     modifiedTimeStamp = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    majorRevision = Column(Integer, default=1)
-    minorRevision = Column(Integer, default=0)
+    majorRevision = Column(String(10), default="1")
+    minorRevision = Column(String(10), default="0")
     checkout = Column(Boolean, default=False)
     locked = Column(Boolean, default=False)
     status = Column(String(50), default="valid")
@@ -162,7 +167,7 @@ class TreatmentDefinitionGroup(Base):
     parentFolderUri = Column(Text, nullable=True)
     fromRevisionUri = Column(Text, nullable=True)
 
-    version = Column(Integer, default=1)
+    version = Column(String(36), default=generate_uuid)
 
     members = relationship("GroupMember", back_populates="group", cascade="all, delete-orphan")
     revisions = relationship("TreatmentDefinitionGroupRevision", back_populates="group", cascade="all, delete-orphan")
@@ -171,8 +176,8 @@ class TreatmentDefinitionGroup(Base):
 class TreatmentDefinitionGroupRevision(Base):
     __tablename__ = "treatment_definition_group_revisions"
 
-    id = Column(Integer, primary_key=True, index=True)
-    group_id = Column(Integer, ForeignKey("treatment_definition_groups.id"), nullable=False, index=True)
+    id = Column(String(36), primary_key=True, index=True, default=generate_uuid)
+    group_id = Column(String(36), ForeignKey("treatment_definition_groups.id"), nullable=False, index=True)
 
     name = Column(String(255), nullable=False, index=True)
     description = Column(Text, nullable=True)
@@ -182,8 +187,8 @@ class TreatmentDefinitionGroupRevision(Base):
     modifiedBy = Column(String(255), nullable=True)
     modifiedTimeStamp = Column(DateTime, default=datetime.utcnow)
 
-    majorRevision = Column(Integer, default=1)
-    minorRevision = Column(Integer, default=0)
+    majorRevision = Column(String(10), default="1")
+    minorRevision = Column(String(10), default="0")
     checkout = Column(Boolean, default=False)
     locked = Column(Boolean, default=False)
     status = Column(String(50), default="valid")
@@ -202,10 +207,10 @@ class TreatmentDefinitionGroupRevision(Base):
 class GroupRevisionMember(Base):
     __tablename__ = "treatment_definition_group_revision_members"
 
-    id = Column(Integer, primary_key=True, index=True)
-    revision_id = Column(Integer, ForeignKey("treatment_definition_group_revisions.id"), nullable=False, index=True)
-    definitionId = Column(Integer, ForeignKey("treatment_definitions.id"), nullable=False, index=True)
-    definitionRevisionId = Column(Integer, ForeignKey("treatment_definition_revisions.id"), nullable=True)
+    id = Column(String(36), primary_key=True, index=True, default=generate_uuid)
+    revision_id = Column(String(36), ForeignKey("treatment_definition_group_revisions.id"), nullable=False, index=True)
+    definitionId = Column(String(36), ForeignKey("treatment_definitions.id"), nullable=False, index=True)
+    definitionRevisionId = Column(String(36), ForeignKey("treatment_definition_revisions.id"), nullable=True)
     definitionRevisionName = Column(String(255), nullable=True)
 
     revision = relationship("TreatmentDefinitionGroupRevision", back_populates="members")
@@ -223,9 +228,9 @@ class GroupRevisionMember(Base):
 class GroupRevisionAttributeValueMapping(Base):
     __tablename__ = "group_revision_attribute_value_mappings"
 
-    id = Column(Integer, primary_key=True, index=True)
-    member_id = Column(Integer, ForeignKey("treatment_definition_group_revision_members.id"), nullable=False, index=True)
-    attributeId = Column(Integer, ForeignKey("attributes.id"), nullable=True)
+    id = Column(String(36), primary_key=True, index=True, default=generate_uuid)
+    member_id = Column(String(36), ForeignKey("treatment_definition_group_revision_members.id"), nullable=False, index=True)
+    attributeId = Column(String(36), ForeignKey("attributes.id"), nullable=True)
     attributeName = Column(String(255), nullable=False)
     mappingType = Column(String(20), nullable=False)
     value = Column(Text, nullable=True)
@@ -236,9 +241,9 @@ class GroupRevisionAttributeValueMapping(Base):
 class GroupRevisionAttributeNameAlias(Base):
     __tablename__ = "group_revision_attribute_name_aliases"
 
-    id = Column(Integer, primary_key=True, index=True)
-    member_id = Column(Integer, ForeignKey("treatment_definition_group_revision_members.id"), nullable=False, index=True)
-    attributeId = Column(Integer, ForeignKey("attributes.id"), nullable=True)
+    id = Column(String(36), primary_key=True, index=True, default=generate_uuid)
+    member_id = Column(String(36), ForeignKey("treatment_definition_group_revision_members.id"), nullable=False, index=True)
+    attributeId = Column(String(36), ForeignKey("attributes.id"), nullable=True)
     attributeName = Column(String(255), nullable=False)
     aliasName = Column(String(255), nullable=False)
 
@@ -248,10 +253,10 @@ class GroupRevisionAttributeNameAlias(Base):
 class GroupMember(Base):
     __tablename__ = "treatment_definition_group_members"
 
-    id = Column(Integer, primary_key=True, index=True)
-    group_id = Column(Integer, ForeignKey("treatment_definition_groups.id"), nullable=False, index=True)
-    definitionId = Column(Integer, ForeignKey("treatment_definitions.id"), nullable=False, index=True)
-    definitionRevisionId = Column(Integer, ForeignKey("treatment_definition_revisions.id"), nullable=True)
+    id = Column(String(36), primary_key=True, index=True, default=generate_uuid)
+    group_id = Column(String(36), ForeignKey("treatment_definition_groups.id"), nullable=False, index=True)
+    definitionId = Column(String(36), ForeignKey("treatment_definitions.id"), nullable=False, index=True)
+    definitionRevisionId = Column(String(36), ForeignKey("treatment_definition_revisions.id"), nullable=True)
     definitionRevisionName = Column(String(255), nullable=True)
 
     group = relationship("TreatmentDefinitionGroup", back_populates="members")
@@ -269,9 +274,9 @@ class GroupMember(Base):
 class AttributeValueMapping(Base):
     __tablename__ = "attribute_value_mappings"
 
-    id = Column(Integer, primary_key=True, index=True)
-    member_id = Column(Integer, ForeignKey("treatment_definition_group_members.id"), nullable=False, index=True)
-    attributeId = Column(Integer, ForeignKey("attributes.id"), nullable=True)
+    id = Column(String(36), primary_key=True, index=True, default=generate_uuid)
+    member_id = Column(String(36), ForeignKey("treatment_definition_group_members.id"), nullable=False, index=True)
+    attributeId = Column(String(36), ForeignKey("attributes.id"), nullable=True)
     attributeName = Column(String(255), nullable=False)
     mappingType = Column(String(20), nullable=False)
     value = Column(Text, nullable=True)
@@ -282,9 +287,9 @@ class AttributeValueMapping(Base):
 class AttributeNameAlias(Base):
     __tablename__ = "attribute_name_aliases"
 
-    id = Column(Integer, primary_key=True, index=True)
-    member_id = Column(Integer, ForeignKey("treatment_definition_group_members.id"), nullable=False, index=True)
-    attributeId = Column(Integer, ForeignKey("attributes.id"), nullable=True)
+    id = Column(String(36), primary_key=True, index=True, default=generate_uuid)
+    member_id = Column(String(36), ForeignKey("treatment_definition_group_members.id"), nullable=False, index=True)
+    attributeId = Column(String(36), ForeignKey("attributes.id"), nullable=True)
     attributeName = Column(String(255), nullable=False)
     aliasName = Column(String(255), nullable=False)
 

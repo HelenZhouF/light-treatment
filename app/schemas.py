@@ -35,7 +35,7 @@ class ValueConstraintsUpdate(BaseModel):
 
 
 class ValueConstraintsResponse(ValueConstraintsBase):
-    id: int
+    id: str
 
     class Config:
         from_attributes = True
@@ -58,7 +58,7 @@ class AttributeUpdate(BaseModel):
 
 
 class AttributeResponse(BaseModel):
-    id: int
+    id: str
     name: str
     defaultValue: Optional[str] = None
     valueConstraints: Optional[ValueConstraintsResponse] = None
@@ -83,15 +83,15 @@ class TreatmentDefinitionUpdate(BaseModel):
 
 
 class TreatmentDefinitionSummary(BaseModel):
-    id: int
+    id: str
     name: str
     description: Optional[str] = None
     createdBy: Optional[str] = None
     creationTimeStamp: Optional[datetime] = None
     modifiedBy: Optional[str] = None
     modifiedTimeStamp: Optional[datetime] = None
-    majorRevision: int = 1
-    minorRevision: int = 0
+    majorRevision: str = "1"
+    minorRevision: str = "0"
     checkout: bool = False
     locked: bool = False
     status: str = "valid"
@@ -106,14 +106,17 @@ class TreatmentDefinitionResponse(TreatmentDefinitionSummary):
     folderType: Optional[str] = None
     sourceRevisionUri: Optional[str] = None
     copyTimeStamp: Optional[datetime] = None
-    version: int = 1
+    version: str
+
+    class Config:
+        from_attributes = True
 
 
 class TreatmentDefinitionRevisionSummary(BaseModel):
-    id: int
+    id: str
     name: str
-    majorRevision: int
-    minorRevision: int
+    majorRevision: str
+    minorRevision: str
     status: str
     links: List[Link] = []
 
@@ -149,7 +152,7 @@ class RevisionCreate(BaseModel):
 
 class RevisionSelection(BaseModel):
     type: str = Field("id", pattern="^id$")
-    resources: List[int]
+    resources: List[str]
 
 
 class RevisionBatchQuery(BaseModel):
@@ -160,22 +163,22 @@ class RevisionBatchQuery(BaseModel):
 
 
 class AttributeValueMappingCreate(BaseModel):
-    attributeId: Optional[int] = None
+    attributeId: Optional[str] = None
     attributeName: str
     mappingType: str = Field(..., pattern="^(variable|constant)$")
     value: Optional[str] = None
 
 
 class AttributeValueMappingUpdate(BaseModel):
-    attributeId: Optional[int] = None
+    attributeId: Optional[str] = None
     attributeName: Optional[str] = None
     mappingType: Optional[str] = Field(None, pattern="^(variable|constant)$")
     value: Optional[str] = None
 
 
 class AttributeValueMappingResponse(BaseModel):
-    id: int
-    attributeId: Optional[int] = None
+    id: str
+    attributeId: Optional[str] = None
     attributeName: str
     mappingType: str
     value: Optional[str] = None
@@ -185,20 +188,20 @@ class AttributeValueMappingResponse(BaseModel):
 
 
 class AttributeNameAliasCreate(BaseModel):
-    attributeId: Optional[int] = None
+    attributeId: Optional[str] = None
     attributeName: str
     aliasName: str
 
 
 class AttributeNameAliasUpdate(BaseModel):
-    attributeId: Optional[int] = None
+    attributeId: Optional[str] = None
     attributeName: Optional[str] = None
     aliasName: Optional[str] = None
 
 
 class AttributeNameAliasResponse(BaseModel):
-    id: int
-    attributeId: Optional[int] = None
+    id: str
+    attributeId: Optional[str] = None
     attributeName: str
     aliasName: str
 
@@ -207,25 +210,25 @@ class AttributeNameAliasResponse(BaseModel):
 
 
 class GroupMemberCreate(BaseModel):
-    definitionId: int
-    definitionRevisionId: Optional[int] = None
+    definitionId: str
+    definitionRevisionId: Optional[str] = None
     definitionRevisionName: Optional[str] = None
     attributeValueMappings: Optional[List[AttributeValueMappingCreate]] = None
     attributeNameAliases: Optional[List[AttributeNameAliasCreate]] = None
 
 
 class GroupMemberUpdate(BaseModel):
-    definitionId: Optional[int] = None
-    definitionRevisionId: Optional[int] = None
+    definitionId: Optional[str] = None
+    definitionRevisionId: Optional[str] = None
     definitionRevisionName: Optional[str] = None
     attributeValueMappings: Optional[List[AttributeValueMappingCreate]] = None
     attributeNameAliases: Optional[List[AttributeNameAliasCreate]] = None
 
 
 class GroupMemberResponse(BaseModel):
-    id: int
-    definitionId: int
-    definitionRevisionId: Optional[int] = None
+    id: str
+    definitionId: str
+    definitionRevisionId: Optional[str] = None
     definitionRevisionName: Optional[str] = None
     attributeValueMappings: List[AttributeValueMappingResponse] = []
     attributeNameAliases: List[AttributeNameAliasResponse] = []
@@ -266,15 +269,15 @@ class TreatmentDefinitionGroupUpdate(BaseModel):
 
 
 class TreatmentDefinitionGroupSummary(BaseModel):
-    id: int
+    id: str
     name: str
     description: Optional[str] = None
     createdBy: Optional[str] = None
     creationTimeStamp: Optional[datetime] = None
     modifiedBy: Optional[str] = None
     modifiedTimeStamp: Optional[datetime] = None
-    majorRevision: int = 1
-    minorRevision: int = 0
+    majorRevision: str = "1"
+    minorRevision: str = "0"
     checkout: bool = False
     locked: bool = False
     status: str = "valid"
@@ -290,10 +293,10 @@ class TreatmentDefinitionGroupSummary(BaseModel):
 
 
 class TreatmentDefinitionGroupRevisionSummary(BaseModel):
-    id: int
+    id: str
     name: str
-    majorRevision: int
-    minorRevision: int
+    majorRevision: str
+    minorRevision: str
     status: str
     activationStatus: Optional[str] = None
     links: List[Link] = []
@@ -301,28 +304,31 @@ class TreatmentDefinitionGroupRevisionSummary(BaseModel):
 
 class TreatmentDefinitionGroupResponse(TreatmentDefinitionGroupSummary):
     members: List[GroupMemberResponse] = []
-    version: int = 1
+    version: str
+
+    class Config:
+        from_attributes = True
 
 
 # ------------------------- Treatment Definition Group Revision schemas -------------------------
 
 
 class GroupRevisionAttributeValueMappingCreate(BaseModel):
-    attributeId: Optional[int] = None
+    attributeId: Optional[str] = None
     attributeName: str
     mappingType: str = Field(..., pattern="^(variable|constant)$")
     value: Optional[str] = None
 
 
 class GroupRevisionAttributeNameAliasCreate(BaseModel):
-    attributeId: Optional[int] = None
+    attributeId: Optional[str] = None
     attributeName: str
     aliasName: str
 
 
 class GroupRevisionMemberCreate(BaseModel):
-    definitionId: int
-    definitionRevisionId: Optional[int] = None
+    definitionId: str
+    definitionRevisionId: Optional[str] = None
     definitionRevisionName: Optional[str] = None
     attributeValueMappings: Optional[List[GroupRevisionAttributeValueMappingCreate]] = None
     attributeNameAliases: Optional[List[GroupRevisionAttributeNameAliasCreate]] = None
@@ -337,5 +343,16 @@ class GroupRevisionCreate(BaseModel):
 
 
 class GroupRevisionActivateRequest(BaseModel):
-    id: Optional[int] = None
+    id: Optional[str] = None
     uri: Optional[str] = None
+
+
+class ValidationError(BaseModel):
+    code: Optional[str] = None
+    message: str
+    details: Optional[dict] = None
+
+
+class ValidationResult(BaseModel):
+    valid: bool
+    error: Optional[ValidationError] = None
