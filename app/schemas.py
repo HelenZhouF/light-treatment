@@ -302,3 +302,40 @@ class TreatmentDefinitionGroupRevisionSummary(BaseModel):
 class TreatmentDefinitionGroupResponse(TreatmentDefinitionGroupSummary):
     members: List[GroupMemberResponse] = []
     version: int = 1
+
+
+# ------------------------- Treatment Definition Group Revision schemas -------------------------
+
+
+class GroupRevisionAttributeValueMappingCreate(BaseModel):
+    attributeId: Optional[int] = None
+    attributeName: str
+    mappingType: str = Field(..., pattern="^(variable|constant)$")
+    value: Optional[str] = None
+
+
+class GroupRevisionAttributeNameAliasCreate(BaseModel):
+    attributeId: Optional[int] = None
+    attributeName: str
+    aliasName: str
+
+
+class GroupRevisionMemberCreate(BaseModel):
+    definitionId: int
+    definitionRevisionId: Optional[int] = None
+    definitionRevisionName: Optional[str] = None
+    attributeValueMappings: Optional[List[GroupRevisionAttributeValueMappingCreate]] = None
+    attributeNameAliases: Optional[List[GroupRevisionAttributeNameAliasCreate]] = None
+
+
+class GroupRevisionCreate(BaseModel):
+    revisionType: Optional[str] = Field("minor", pattern="^(major|minor)$")
+    fromRevisionUri: Optional[str] = None
+    name: Optional[str] = None
+    description: Optional[str] = None
+    members: Optional[List[GroupRevisionMemberCreate]] = None
+
+
+class GroupRevisionActivateRequest(BaseModel):
+    id: Optional[int] = None
+    uri: Optional[str] = None
